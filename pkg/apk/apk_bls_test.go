@@ -1,24 +1,77 @@
 package apk
 
 import (
-	"fmt"
 	"math/big"
+	"math/rand"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
-	"github.com/consensys/gnark/backend/groth16"
 	"github.com/consensys/gnark/frontend"
-	"github.com/consensys/gnark/frontend/cs/r1cs"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/math/emulated"
 	"github.com/consensys/gnark/test"
 )
 
-func testRoutineAPKG1() (circ, wit frontend.Circuit) {
-	numPoints := 10
+// createBitlist creates a bitlist array with a specified number of randomly set bits
+// numBitsToSet: the number of bits to randomly set (0-1024)
+// Returns: a [5]frontend.Variable array formatted for the circuit and the indices that were set
+func createBitlist(numBitsToSet int) ([5]frontend.Variable, []int) {
+	bitlist := [5]frontend.Variable{}
+
+	// Initialize all elements to zero
+	for i := 0; i < 5; i++ {
+		bitlist[i] = new(big.Int)
+	}
+
+	if numBitsToSet <= 0 || numBitsToSet > 1024 {
+		return bitlist, []int{}
+	}
+
+	// Create a list of all possible indices and shuffle to get random selection
+	allIndices := make([]int, 1024)
+	for i := range allIndices {
+		allIndices[i] = i
+	}
+
+	// Fisher-Yates shuffle to randomize
+	for i := len(allIndices) - 1; i > 0; i-- {
+		j := rand.Intn(i + 1)
+		allIndices[i], allIndices[j] = allIndices[j], allIndices[i]
+	}
+
+	// Take the first numBitsToSet indices
+	selectedIndices := allIndices[:numBitsToSet]
+
+	// Set bits at selected indices
+	for _, idx := range selectedIndices {
+		// Determine which element and bit position
+		var elemIdx int
+		var bitPos int
+
+		if idx < 1000 {
+			// First 4 elements: 250 bits each
+			elemIdx = idx / 250
+			bitPos = idx % 250
+		} else {
+			// Last element: 24 bits (indices 1000-1023)
+			elemIdx = 4
+			bitPos = idx - 1000
+		}
+
+		// Set the bit using LSB encoding
+		val := bitlist[elemIdx].(*big.Int)
+		val.SetBit(val, bitPos, 1)
+	}
+
+	return bitlist, selectedIndices
+}
+
+// testSimpleAPKG1 creates a simple test case with manually selected participants
+func testSimpleAPKG1(t *testing.T, numParticipants int) (circ, wit frontend.Circuit) {
+	numPoints := 1024
 
 	// Get the generator point for BLS12-381 G1
 	_, _, G, _ := bls12381.Generators()
@@ -28,159 +81,72 @@ func testRoutineAPKG1() (circ, wit frontend.Circuit) {
 
 	var init bls12381.G1Affine
 	init.ScalarMultiplication(&G, seed.BigInt(new(big.Int)))
-	// Generate random points by multiplying the generator with random scalars
+
+	// Generate points
 	points := make([]bls12381.G1Affine, numPoints)
 	scalars := make([]fr.Element, numPoints)
 
-	for i := 0; i < numPoints; i++ {
+	for i := range numPoints {
 		scalars[i].SetRandom()
 		points[i].ScalarMultiplication(&G, scalars[i].BigInt(new(big.Int)))
 	}
 
 	// Convert to sw_emulated points
-	var pubKeys [10]sw_emulated.AffinePoint[emulated.BLS12381Fp]
-	for i := 0; i < numPoints; i++ {
+	var pubKeys [1024]sw_emulated.AffinePoint[emulated.BLS12381Fp]
+	for i := range numPoints {
 		pubKeys[i] = sw_bls12381.NewG1Affine(points[i])
 	}
 
-	// Calculate the expected sum (aggregate) of all points
-	expectedSum := &init
-	for i := 0; i < numPoints; i++ {
-		expectedSum = expectedSum.Add(expectedSum, &points[i])
+	// Create a simple bitlist with 50 random participants
+	bitlist, participantIndices := createBitlist(numParticipants)
+
+	t.Logf("Simple test: %d participants randomly selected", numParticipants)
+
+	// Calculate expected partial sum for selected participants
+	expectedPartialSum := init
+	for _, idx := range participantIndices {
+		expectedPartialSum.Add(&expectedPartialSum, &points[idx])
 	}
 
-	// log the expected sum
-	fmt.Printf("testRoutineAPKG1: Final expectedSum X coordinate: %v\n", expectedSum.X.String())
-	fmt.Printf("testRoutineAPKG1: Final expectedSum Y coordinate: %v\n", expectedSum.Y.String())
+	// Calculate expected total sum (all points)
+	expectedTotalSum := init
+	for i := range numPoints {
+		expectedTotalSum.Add(&expectedTotalSum, &points[i])
+	}
 
 	// Create circuit and witness
-	circuit := APKCircuit{}
-	witness := APKCircuit{
-		PublicKeys:  pubKeys,
-		NumKeys:     numPoints,
-		ExpectedSum: sw_bls12381.NewG1Affine(*expectedSum),
-		Seed: sw_bls12381.NewG1Affine(init),
+	circuit := APKProofCircuit{}
+	witness := APKProofCircuit{
+		PublicKeys:         pubKeys,
+		Bitlist:            bitlist,
+		ExpectedPartialSum: sw_bls12381.NewG1Affine(expectedPartialSum),
+		ExpectedTotalSum:   sw_bls12381.NewG1Affine(expectedTotalSum),
+		Seed:               sw_bls12381.NewG1Affine(init),
 	}
 
 	return &circuit, &witness
 }
 
-func TestBLSG1APKCircuit(t *testing.T) {
-	// Test with 3 points
-	circuit, witness := testRoutineAPKG1()
+func TestSimpleBLSG1APKCircuit(t *testing.T) {
+	// Test with randomly selected participants
+	circuit, witness := testSimpleAPKG1(t, 600)
 	assert := test.NewAssert(t)
 	err := test.IsSolved(circuit, witness, ecc.BLS12_381.ScalarField())
 	assert.NoError(err)
 }
 
-// GenerateBLSG1APKProof creates a proof that a list of BLS G1 public keys
-// aggregate to the expected sum
-func GenerateBLSG1APKProof(publicKeys []sw_emulated.AffinePoint[emulated.BLS12381Fp], expectedSum sw_emulated.AffinePoint[emulated.BLS12381Fp]) (groth16.Proof, groth16.VerifyingKey, error) {
-	// Create and compile the circuit
-	var pubKeysArray [10]sw_emulated.AffinePoint[emulated.BLS12381Fp]
-	numKeys := len(publicKeys)
-	if numKeys > 10 {
-		numKeys = 10
-	}
-
-	// Copy the provided public keys
-	for i := 0; i < numKeys; i++ {
-		pubKeysArray[i] = publicKeys[i]
-	}
-
-	circuit := APKCircuit{
-		PublicKeys:  pubKeysArray,
-		NumKeys:     numKeys,
-		ExpectedSum: expectedSum,
-	}
-
-	ccs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), r1cs.NewBuilder, &circuit)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to compile circuit: %w", err)
-	}
-
-	// Setup the proving and verification keys
-	pk, vk, err := groth16.Setup(ccs)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to setup: %w", err)
-	}
-
-	// Create a witness using our inputs
-	witness, err := frontend.NewWitness(&circuit, ecc.BLS12_381.ScalarField())
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create witness: %w", err)
-	}
-
-	// Generate the proof
-	proof, err := groth16.Prove(ccs, pk, witness)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to generate proof: %w", err)
-	}
-
-	return proof, vk, nil
-}
-
-// VerifyBLSG1APKProof verifies an APK proof for BLS G1 public keys
-func VerifyBLSG1APKProof(proof groth16.Proof, vk groth16.VerifyingKey, publicKeys []sw_emulated.AffinePoint[emulated.BLS12381Fp], expectedSum sw_emulated.AffinePoint[emulated.BLS12381Fp]) error {
-	// Create a public witness with only the public inputs
-	var pubKeysArray [10]sw_emulated.AffinePoint[emulated.BLS12381Fp]
-	numKeys := len(publicKeys)
-	if numKeys > 10 {
-		numKeys = 10
-	}
-
-	// Copy the provided public keys
-	for i := 0; i < numKeys; i++ {
-		pubKeysArray[i] = publicKeys[i]
-	}
-
-	assignment := APKCircuit{
-		PublicKeys:  pubKeysArray,
-		NumKeys:     numKeys,
-		ExpectedSum: expectedSum,
-	}
-
-	publicWitness, err := frontend.NewWitness(&assignment, ecc.BLS12_381.ScalarField(), frontend.PublicOnly())
-	if err != nil {
-		return fmt.Errorf("failed to create public witness: %w", err)
-	}
-
-	// Verify the proof
-	err = groth16.Verify(proof, vk, publicWitness)
-	if err != nil {
-		return fmt.Errorf("failed to verify proof: %w", err)
-	}
-
-	return nil
-}
-
-// TestProofGenerationAndVerification tests the full workflow of generating and verifying a proof
-func TestProofGenerationAndVerification(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping test in short mode")
-	}
-
-	// We'll skip TestProofGenerationAndVerification for now
-	// as it requires more work to properly generate proofs with the circuit API
-	t.Skip("Skipping proof generation test - requires more complex setup")
-}
-
-// disabledProofTest is a placeholder that shows how proof generation would work
-// This is kept for reference but not executed as a test
-func disabledProofTest(t *testing.T) {
+func TestAllBitsSetBLSG1APKCircuit(t *testing.T) {
+	// Test with randomly selected participants
+	circuit, witness := testSimpleAPKG1(t, 1024)
 	assert := test.NewAssert(t)
+	err := test.IsSolved(circuit, witness, ecc.BLS12_381.ScalarField())
+	assert.NoError(err)
+}
 
-	// Get the generator point for BLS12-381 G1
-	_, _, G, _ := bls12381.Generators()
-
-	// Generate 3 random points
-	points := make([]bls12381.G1Affine, 3)
-	scalars := make([]fr.Element, 3)
-
-	for i := 0; i < 3; i++ {
-		scalars[i].SetRandom()
-		points[i].ScalarMultiplication(&G, scalars[i].BigInt(new(big.Int)))
-	}
-
-	assert.NoError(nil) // Placeholder assertion
+func TestNoBitsSetBLSG1APKCircuit(t *testing.T) {
+	// Test with randomly selected participants
+	circuit, witness := testSimpleAPKG1(t, 0)
+	assert := test.NewAssert(t)
+	err := test.IsSolved(circuit, witness, ecc.BLS12_381.ScalarField())
+	assert.NoError(err)
 }
