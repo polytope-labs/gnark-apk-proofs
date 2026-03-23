@@ -1,0 +1,3 @@
+[workspace]
+members = ["rust/ffi", "rust/prover"]
+resolver = "2"

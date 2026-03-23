@@ -1,3 +1,18 @@
+// Copyright 2026 Polytope Labs.
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package apk
 
 import (
@@ -21,36 +36,35 @@ import (
 
 // Groth16Harness encapsulates all components needed for Groth16 proving
 type Groth16Harness struct {
-	CS  constraint.ConstraintSystem
-	PK  groth16.ProvingKey
-	VK  groth16.VerifyingKey
-	PKV groth16.ProvingKey // Optional: for verifying key verification
+	CS constraint.ConstraintSystem
+	PK groth16.ProvingKey
+	VK groth16.VerifyingKey
 }
 
 // SetupGroth16 compiles the circuit and performs trusted setup
 func SetupGroth16(t *testing.T) (*Groth16Harness, error) {
 	t.Log("Setting up Groth16 proving system...")
 
-	// Create an empty circuit for compilation
 	circuit := APKProofCircuit{}
 
-	// Compile the circuit
 	t.Log("Compiling circuit...")
+	startCompile := time.Now()
 	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), r1cs.NewBuilder, &circuit)
+	compileTime := time.Since(startCompile)
 	if err != nil {
 		return nil, err
 	}
+	t.Logf("Circuit compiled successfully in %v. Number of constraints: %d", compileTime, cs.GetNbConstraints())
 
-	t.Logf("Circuit compiled successfully. Number of constraints: %d", cs.GetNbConstraints())
-
-	// Perform trusted setup
 	t.Log("Performing trusted setup (generating proving and verifying keys)...")
+	startSetup := time.Now()
 	pk, vk, err := groth16.Setup(cs)
+	setupTime := time.Since(startSetup)
 	if err != nil {
 		return nil, err
 	}
 
-	t.Log("Trusted setup completed successfully")
+	t.Logf("Trusted setup completed successfully in %v", setupTime)
 
 	return &Groth16Harness{
 		CS: cs,
@@ -74,7 +88,6 @@ func GenerateWitness(t *testing.T, config WitnessConfig) *APKProofCircuit {
 
 	numPoints := 1024
 
-	// Get the generator point for BLS12-381 G1
 	_, _, G, _ := bls12381.Generators()
 
 	var seed fr.Element
@@ -83,7 +96,6 @@ func GenerateWitness(t *testing.T, config WitnessConfig) *APKProofCircuit {
 	var init bls12381.G1Affine
 	init.ScalarMultiplication(&G, seed.BigInt(new(big.Int)))
 
-	// Generate random points
 	points := make([]bls12381.G1Affine, numPoints)
 	for i := range numPoints {
 		var scalar fr.Element
@@ -91,13 +103,11 @@ func GenerateWitness(t *testing.T, config WitnessConfig) *APKProofCircuit {
 		points[i].ScalarMultiplication(&G, scalar.BigInt(new(big.Int)))
 	}
 
-	// Convert to sw_emulated points
 	var pubKeys [1024]sw_emulated.AffinePoint[emulated.BLS12381Fp]
 	for i := range numPoints {
 		pubKeys[i] = sw_bls12381.NewG1Affine(points[i])
 	}
 
-	// Create bitlist based on config
 	var bitlist [5]frontend.Variable
 	var participantIndices []int
 
@@ -110,36 +120,39 @@ func GenerateWitness(t *testing.T, config WitnessConfig) *APKProofCircuit {
 		t.Logf("Generated bitlist with specific indices: %v", config.SpecificIndices)
 	}
 
-	// Calculate expected partial sum
-	expectedPartialSum := init
+	participantSet := make(map[int]bool, len(participantIndices))
 	for _, idx := range participantIndices {
 		if idx >= 0 && idx < numPoints {
-			expectedPartialSum.Add(&expectedPartialSum, &points[idx])
+			participantSet[idx] = true
 		}
 	}
 
-	// Calculate expected total sum
-	expectedTotalSum := init
+	// Compute expected APK: Seed + Σ b_i * pk_i
+	expectedAPK := init
 	for i := range numPoints {
-		expectedTotalSum.Add(&expectedTotalSum, &points[i])
+		if participantSet[i] {
+			expectedAPK.Add(&expectedAPK, &points[i])
+		}
 	}
 
+	// Compute Poseidon2 commitment over all public keys
+	commitment := NativePublicKeysCommitment(points)
+	t.Logf("Public keys commitment: %s", commitment.String())
+
 	return &APKProofCircuit{
-		PublicKeys:         pubKeys,
-		Bitlist:            bitlist,
-		ExpectedPartialSum: sw_bls12381.NewG1Affine(expectedPartialSum),
-		ExpectedTotalSum:   sw_bls12381.NewG1Affine(expectedTotalSum),
-		Seed:               sw_bls12381.NewG1Affine(init),
+		PublicKeys:          pubKeys,
+		Bitlist:             bitlist,
+		Seed:                sw_bls12381.NewG1Affine(init),
+		PublicKeysCommitment: commitment,
+		ExpectedAPK:         sw_bls12381.NewG1Affine(expectedAPK),
 	}
 }
 
 // TestGroth16ProveAndVerify tests the full Groth16 pipeline
 func TestGroth16ProveAndVerify(t *testing.T) {
-	// Setup the proving system
 	harness, err := SetupGroth16(t)
 	assert.NoError(t, err, "Failed to setup Groth16")
 
-	// Test cases with different participation levels
 	testCases := []struct {
 		name   string
 		config WitnessConfig
@@ -179,15 +192,19 @@ func TestGroth16ProveAndVerify(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Generate witness
+			t.Log("Generating witness data...")
+			startWitnessGen := time.Now()
 			witness := GenerateWitness(t, tc.config)
+			witnessGenTime := time.Since(startWitnessGen)
+			t.Logf("Witness data generated in %v", witnessGenTime)
 
-			// Create the witness
 			t.Log("Creating witness...")
+			startWitnessCreate := time.Now()
 			fullWitness, err := frontend.NewWitness(witness, ecc.BLS12_381.ScalarField())
+			witnessCreateTime := time.Since(startWitnessCreate)
 			assert.NoError(t, err, "Failed to create witness")
+			t.Logf("Witness created in %v", witnessCreateTime)
 
-			// Generate the proof
 			t.Log("Generating proof...")
 			startProve := time.Now()
 			proof, err := groth16.Prove(harness.CS, harness.PK, fullWitness)
@@ -195,11 +212,9 @@ func TestGroth16ProveAndVerify(t *testing.T) {
 			assert.NoError(t, err, "Failed to generate proof")
 			t.Logf("Proof generated in %v", proveTime)
 
-			// Extract public witness for verification
 			publicWitness, err := fullWitness.Public()
 			assert.NoError(t, err, "Failed to extract public witness")
 
-			// Verify the proof
 			t.Log("Verifying proof...")
 			startVerify := time.Now()
 			err = groth16.Verify(proof, harness.VK, publicWitness)
@@ -212,29 +227,29 @@ func TestGroth16ProveAndVerify(t *testing.T) {
 
 // TestGroth16InvalidProof tests that invalid proofs are rejected
 func TestGroth16InvalidProof(t *testing.T) {
-	// Setup the proving system
 	harness, err := SetupGroth16(t)
 	assert.NoError(t, err, "Failed to setup Groth16")
 
-	// Generate a valid witness
+	t.Log("Generating witness data for valid proof...")
 	witness := GenerateWitness(t, WitnessConfig{
 		NumParticipants: 50,
 		UseRandom:       true,
 		Seed:            123,
 	})
 
-	// Create the witness
 	fullWitness, err := frontend.NewWitness(witness, ecc.BLS12_381.ScalarField())
 	assert.NoError(t, err, "Failed to create witness")
 
-	// Generate a valid proof
 	t.Log("Generating valid proof...")
+	startProve := time.Now()
 	validProof, err := groth16.Prove(harness.CS, harness.PK, fullWitness)
+	proveTime := time.Since(startProve)
 	assert.NoError(t, err, "Failed to generate proof")
+	t.Logf("Valid proof generated in %v", proveTime)
 
-	// Create a different witness (with different public inputs)
+	t.Log("Generating different witness data for invalid proof test...")
 	differentWitness := GenerateWitness(t, WitnessConfig{
-		NumParticipants: 100, // Different number of participants
+		NumParticipants: 100,
 		UseRandom:       true,
 		Seed:            456,
 	})
@@ -242,11 +257,9 @@ func TestGroth16InvalidProof(t *testing.T) {
 	differentFullWitness, err := frontend.NewWitness(differentWitness, ecc.BLS12_381.ScalarField())
 	assert.NoError(t, err, "Failed to create different witness")
 
-	// Extract public witness from the different witness
 	wrongPublicWitness, err := differentFullWitness.Public()
 	assert.NoError(t, err, "Failed to extract wrong public witness")
 
-	// Try to verify the valid proof with wrong public inputs
 	t.Log("Attempting to verify proof with wrong public inputs...")
 	err = groth16.Verify(validProof, harness.VK, wrongPublicWitness)
 	assert.Error(t, err, "Proof should not verify with wrong public inputs")
@@ -255,7 +268,6 @@ func TestGroth16InvalidProof(t *testing.T) {
 
 // TestGroth16EdgeCases tests edge cases like all bits set and no bits set
 func TestGroth16EdgeCases(t *testing.T) {
-	// Setup the proving system
 	harness, err := SetupGroth16(t)
 	assert.NoError(t, err, "Failed to setup Groth16")
 
@@ -295,14 +307,19 @@ func TestGroth16EdgeCases(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Generate witness
+			t.Log("Generating witness data...")
+			startWitnessGen := time.Now()
 			witness := GenerateWitness(t, tc.config)
+			witnessGenTime := time.Since(startWitnessGen)
+			t.Logf("Witness data generated in %v", witnessGenTime)
 
-			// Create the witness
+			t.Log("Creating witness...")
+			startWitnessCreate := time.Now()
 			fullWitness, err := frontend.NewWitness(witness, ecc.BLS12_381.ScalarField())
+			witnessCreateTime := time.Since(startWitnessCreate)
 			assert.NoError(t, err, "Failed to create witness")
+			t.Logf("Witness created in %v", witnessCreateTime)
 
-			// Generate and verify proof
 			proof, err := groth16.Prove(harness.CS, harness.PK, fullWitness)
 			assert.NoError(t, err, "Failed to generate proof")
 

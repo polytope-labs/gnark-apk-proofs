@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  GO_VERSION: "1.25.7"
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  go-circuits:
+    name: Go circuits
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: circuits/go.sum
+
+      - name: Build
+        working-directory: circuits
+        run: go build ./...
+
+      - name: Test (BLS circuit checks)
+        working-directory: circuits
+        run: go test -v -timeout 20m -run "TestCircuitCompiles|TestSimpleBLSG1APKCircuit" ./apk/
+
+  solidity:
+    name: Solidity verifiers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: go-circuits
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: circuits/go.sum
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Generate Groth16 verifier + proof fixtures
+        working-directory: circuits
+        run: go test -v -timeout 20m -run "TestExportGroth16ForFoundry" ./apk/
+
+      - name: Generate PLONK verifier + proof fixtures
+        working-directory: circuits
+        run: go test -v -timeout 20m -run "TestExportPlonkForFoundry" ./apk/
+
+      - name: Run Foundry tests
+        working-directory: solidity
+        run: forge test -vvv
+
+  rust:
+    name: Rust prover
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: circuits/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  rust-integration:
+    name: Rust integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: circuits/go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Groth16 prove (integration)
+        run: cargo test test_groth16_prove -- --ignored --nocapture
