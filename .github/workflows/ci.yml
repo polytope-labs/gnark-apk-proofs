@@ -69,13 +69,20 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
         run: cargo build
 
+      - name: Test
+        run: cargo test
+
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo +nightly fmt --check
 
       - name: Clippy
         run: cargo clippy -- -D warnings

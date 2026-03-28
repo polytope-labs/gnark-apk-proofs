@@ -15,54 +15,51 @@
 
 #[repr(C)]
 pub struct CProveResult {
-    pub proof_data: *const u8,
-    pub proof_len: u32,
-    pub public_inputs_data: *const u8,
-    pub public_inputs_len: u32,
-    pub error: *const std::ffi::c_char,
+	pub proof_data: *const u8,
+	pub proof_len: u32,
+	pub public_inputs_data: *const u8,
+	pub public_inputs_len: u32,
+	pub error: *const std::ffi::c_char,
 }
 
 impl Default for CProveResult {
-    fn default() -> Self {
-        Self {
-            proof_data: std::ptr::null(),
-            proof_len: 0,
-            public_inputs_data: std::ptr::null(),
-            public_inputs_len: 0,
-            error: std::ptr::null(),
-        }
-    }
+	fn default() -> Self {
+		Self {
+			proof_data: std::ptr::null(),
+			proof_len: 0,
+			public_inputs_data: std::ptr::null(),
+			public_inputs_len: 0,
+			error: std::ptr::null(),
+		}
+	}
 }
 
 extern "C" {
-    pub fn APKSetup(srs_dir: *const std::ffi::c_char) -> u64;
-    pub fn APKFreeHandle(handle: u64);
+	pub fn APKSetup(srs_dir: *const std::ffi::c_char) -> u64;
+	pub fn APKFreeHandle(handle: u64);
 
-    pub fn APKProve(
-        handle: u64,
-        witness_data: *const u8,
-        witness_len: u32,
-        result: *mut CProveResult,
-    ) -> i32;
+	pub fn APKProve(
+		handle: u64,
+		witness_data: *const u8,
+		witness_len: u32,
+		result: *mut CProveResult,
+	) -> i32;
 
-    pub fn APKFreeResult(result: *mut CProveResult);
+	pub fn APKFreeResult(result: *mut CProveResult);
 
-    pub fn APKExportVK(handle: u64, result: *mut CBuffer) -> i32;
+	pub fn APKExportVK(handle: u64, result: *mut CBuffer) -> i32;
 
-    pub fn APKFreeBuffer(buf: *mut CBuffer);
+	pub fn APKFreeBuffer(buf: *mut CBuffer);
 }
 
 #[repr(C)]
 pub struct CBuffer {
-    pub data: *const u8,
-    pub len: u32,
+	pub data: *const u8,
+	pub len: u32,
 }
 
 impl Default for CBuffer {
-    fn default() -> Self {
-        Self {
-            data: std::ptr::null(),
-            len: 0,
-        }
-    }
+	fn default() -> Self {
+		Self { data: std::ptr::null(), len: 0 }
+	}
 }
