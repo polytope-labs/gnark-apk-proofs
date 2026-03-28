@@ -1,0 +1,19 @@
+[package]
+name = "gnark-apk-prover"
+version = "0.1.0"
+edition = "2021"
+
+
+[features]
+test-utils = ["ark-std"]
+
+[dependencies]
+gnark-apk-ffi = { path = "../ffi" }
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-std = { version = "0.5", optional = true }
+thiserror = "2"
+
+[dev-dependencies]
+ark-std = "0.5"

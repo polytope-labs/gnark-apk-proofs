@@ -1,51 +1,167 @@
 # gnark-apk-proofs
 
-A Go project for working with Aggregated Public Key (APK) Zero-Knowledge Proofs using the gnark framework.
+Zero-knowledge proofs for BLS G1 aggregated public key (APK) verification, built with [gnark](https://github.com/consensys/gnark). Uses the PLONK proving system with on-chain Solidity verification via EIP-2537 precompiles.
 
 ## Overview
 
-This project demonstrates how to create and verify zero-knowledge proofs related to aggregated public keys using the [gnark](https://github.com/consensys/gnark) framework from ConsenSys.
+This project implements a ZK circuit that proves correct aggregation of BLS12-381 G1 public keys for a subset of validators, as described in ["Accountable Light Client Systems for PoS Blockchains"](https://eprint.iacr.org/2022/1205) (Ciobotaru et al., 2022).
+
+The circuit:
+- Accepts 1024 validator public keys as private witnesses
+- Uses a bitlist to indicate participating validators
+- Verifies a Poseidon2 hash commitment to the full validator set
+- Computes `apk = Seed + Σ(b_i * pk_i)` and checks it against the expected aggregate
+
+Rogue key attacks are prevented by requiring Proof of Possession (PoP) at registration.
 
 ## Project Structure
 
 ```
 gnark-apk-proofs/
-├── pkg/         # Public library code
-└── go.mod       # Go module definition
+├── Cargo.toml                 # Rust workspace root
+├── circuits/                  # Go ZK circuit code
+│   ├── go.mod
+│   ├── apk/                   # APK proof circuit + tests
+│   ├── ffi/                   # CGo exports for Rust FFI
+│   └── srs/                   # SRS download + caching from Filecoin ceremony
+├── rust/                      # Rust proving library
+│   ├── ffi/                   # Low-level FFI bindings (builds Go into static archive)
+│   ├── prover/                # Safe Rust API with builder pattern
+│   └── verifier/              # Pure-Rust PLONK verifier (arkworks)
+├── solidity/                  # Foundry/Solidity contracts
+│   ├── foundry.toml
+│   └── contracts/
+│       ├── PlonkVerifier.sol  # Auto-generated gnark PLONK verifier
+│       ├── APKVerifier.sol    # Human-readable wrapper
+│       └── test/              # Gas benchmarks + proof fixtures
+└── README.md
 ```
 
-## Getting Started
+## Performance
+
+**Circuit:** BLS G1 public key aggregation (1024 validators, Poseidon2 commitment)
+
+### Constraint Count
+
+| System | Constraint Type | Count     |
+|--------|-----------------|-----------|
+| PLONK  | SCS             | 7,097,960 |
+
+### Off-chain (Go)
+
+| Phase       | Time              |
+|-------------|-------------------|
+| Compile     | 5.5s              |
+| SRS / Setup | 44.8s (universal) |
+| Witness gen | 157ms             |
+| Prove       | 40.0s             |
+| Verify      | 3.3ms             |
+
+### On-chain (Solidity, EIP-2537, Prague EVM)
+
+| Metric            | Value                    |
+|-------------------|--------------------------|
+| Verification gas  | 385,183                  |
+| Contract bytecode | 11,607 bytes             |
+| Proof size        | 1,184 bytes              |
+| Public inputs     | 960 bytes (30 x uint256) |
+
+PLONK uses a universal SRS (no per-circuit trusted setup). Requires Pectra hardfork (EIP-2537 BLS12-381 precompiles).
+
+## Rust Library
+
+The Rust crate provides a builder-pattern API for generating proofs, backed by the Go gnark prover via static FFI.
+
+### Usage as a dependency
+
+```toml
+[dependencies]
+gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs" }
+```
+
+**Requires Go 1.25+** installed — the build script compiles the Go circuit code into a static archive that is linked into your Rust binary. No shared libraries needed at runtime.
+
+### Example
+
+```rust
+use gnark_apk_prover::{ProofBuilder, G1Affine, ProverContext};
+
+// One-time setup (expensive: ~45s for PLONK)
+// SRS is cached at $HOME/.config/gnark-apk-proofs/srs (downloaded automatically on first run)
+let ctx = ProverContext::setup(None)?;
+
+// Build and generate a proof
+let proof = ProofBuilder::new()
+    .public_keys(validator_keys)   // Vec<G1Affine>, exactly 1024
+    .participation(indices)         // Vec<u16>, participating validator indices
+    .seed(seed_point)               // G1Affine
+    .prove(&ctx)?;
+
+// proof.proof_bytes  — ready for Solidity verifier (1184 bytes)
+// proof.public_inputs — 960 bytes (30 x uint256)
+```
+
+### Build
+
+```bash
+cargo build
+```
+
+### End-to-end test
+
+Generates a PLONK proof via Go FFI and verifies it with the pure-Rust verifier:
+
+```bash
+cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored
+```
+
+## Go Circuit
 
 ### Prerequisites
 
-- Go 1.21 or later
-- Basic understanding of zero-knowledge proofs and gnark framework
+- Go 1.25+
+- [Foundry](https://book.getfoundry.sh/) (for Solidity tests)
 
-### Installation
-
-Clone the repository:
+### Run circuit tests
 
 ```bash
-git clone https://github.com/yourusername/gnark-apk-proofs.git
-cd gnark-apk-proofs
+cd circuits
+go test -v -timeout 30m ./apk/
 ```
 
-Install dependencies:
+### Generate Solidity verifier and proof fixtures
 
 ```bash
-go mod tidy
+cd circuits
+go test -v -run "TestExportPlonkForFoundry" -timeout 30m ./apk/
 ```
 
-### Running the Test
+## Solidity Verifiers
+
+The `APKVerifier` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It wraps the auto-generated `PlonkVerifier` directly:
+
+```solidity
+apkVerifier.verify(proof, APKPublicInputs({
+    bitlist: [...],
+    publicKeysCommitment: ...,
+    seed: seedBytes,                // 96-byte G1 point
+    apk: aggregatePublicKey         // 96-byte G1 point (seed added on-chain)
+}));
+```
+
+### Run Solidity gas benchmarks
 
 ```bash
-go test ./pkg/apk -run TestBLSG1APKCircuit
+cd solidity
+forge test -vvv
 ```
+
+## References
+
+- [gnark](https://github.com/consensys/gnark) — ZKP framework
+- [Accountable Light Client Systems for PoS Blockchains](https://eprint.iacr.org/2022/1205) — Ciobotaru et al., 2022
+- [EIP-2537](https://eips.ethereum.org/EIPS/eip-2537) — BLS12-381 precompiles
 
 ## License
 
-This project is licensed under the Apache License 2.0 - see the LICENSE file for details.
-
-## Acknowledgments
-
-- [gnark](https://github.com/consensys/gnark) - The ZKP framework this project is built on
+Apache License 2.0

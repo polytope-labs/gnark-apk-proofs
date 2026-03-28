@@ -1,0 +1,15 @@
+[package]
+name = "gnark-plonk-verifier"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ark-bls12-381 = "0.5"
+ark-ec = "0.5"
+ark-ff = "0.5"
+ark-serialize = "0.5"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+gnark-apk-prover = { path = "../prover", features = ["test-utils"] }
