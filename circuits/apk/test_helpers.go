@@ -20,8 +20,12 @@ import (
 	"math/rand"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr/poseidon2"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
+	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
+	"github.com/consensys/gnark/std/math/emulated"
 )
 
 // decomposeFpToLimbs decomposes a BLS12-381 Fp element into 6 x 64-bit limbs
@@ -31,7 +35,7 @@ func decomposeFpToLimbs(val *big.Int) [6]*big.Int {
 	var limbs [6]*big.Int
 	mask := new(big.Int).SetUint64(^uint64(0)) // 2^64 - 1
 	tmp := new(big.Int).Set(val)
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		limbs[i] = new(big.Int).And(tmp, mask)
 		tmp.Rsh(tmp, 64)
 	}
@@ -84,7 +88,7 @@ func NativePublicKeysCommitment(points []bls12381.G1Affine) *big.Int {
 func CreateBitlist(numBitsToSet int) ([5]frontend.Variable, []int) {
 	bitlist := [5]frontend.Variable{}
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		bitlist[i] = new(big.Int)
 	}
 
@@ -129,7 +133,7 @@ func CreateBitlist(numBitsToSet int) ([5]frontend.Variable, []int) {
 func CreateBitlistFromIndices(indices []int) [5]frontend.Variable {
 	bitlist := [5]frontend.Variable{}
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		bitlist[i] = new(big.Int)
 	}
 
@@ -160,7 +164,7 @@ func CreateBitlistFromIndices(indices []int) [5]frontend.Variable {
 func DecodeBitlist(bitlist [5]frontend.Variable) []int {
 	var indices []int
 
-	for elemIdx := 0; elemIdx < 5; elemIdx++ {
+	for elemIdx := range 5 {
 		val, ok := bitlist[elemIdx].(*big.Int)
 		if !ok {
 			continue
@@ -177,7 +181,7 @@ func DecodeBitlist(bitlist [5]frontend.Variable) []int {
 			startIdx = 1000
 		}
 
-		for bitPos := 0; bitPos < bitsToCheck; bitPos++ {
+		for bitPos := range bitsToCheck {
 			if val.Bit(bitPos) == 1 {
 				indices = append(indices, startIdx+bitPos)
 			}
@@ -191,7 +195,7 @@ func DecodeBitlist(bitlist [5]frontend.Variable) []int {
 func CountSetBits(bitlist [5]frontend.Variable) int {
 	count := 0
 
-	for elemIdx := 0; elemIdx < 5; elemIdx++ {
+	for elemIdx := range 5 {
 		val, ok := bitlist[elemIdx].(*big.Int)
 		if !ok {
 			continue
@@ -204,7 +208,7 @@ func CountSetBits(bitlist [5]frontend.Variable) int {
 			bitsToCheck = 24
 		}
 
-		for bitPos := 0; bitPos < bitsToCheck; bitPos++ {
+		for bitPos := range bitsToCheck {
 			if val.Bit(bitPos) == 1 {
 				count++
 			}
@@ -212,4 +216,73 @@ func CountSetBits(bitlist [5]frontend.Variable) int {
 	}
 
 	return count
+}
+
+type WitnessConfig struct {
+	NumParticipants int   // Number of participants (bits set)
+	UseRandom       bool  // If true, randomly select participants
+	SpecificIndices []int // If UseRandom is false, use these indices
+	Seed            int64 // Random seed for reproducibility
+}
+
+func GenerateWitness(config WitnessConfig) *APKProofCircuit {
+	if config.Seed != 0 {
+		rand.Seed(config.Seed)
+	}
+
+	numPoints := 1024
+
+	_, _, G, _ := bls12381.Generators()
+
+	var seed fr.Element
+	seed.SetRandom()
+
+	var init bls12381.G1Affine
+	init.ScalarMultiplication(&G, seed.BigInt(new(big.Int)))
+
+	points := make([]bls12381.G1Affine, numPoints)
+	for i := range numPoints {
+		var scalar fr.Element
+		scalar.SetRandom()
+		points[i].ScalarMultiplication(&G, scalar.BigInt(new(big.Int)))
+	}
+
+	var pubKeys [1024]sw_emulated.AffinePoint[emulated.BLS12381Fp]
+	for i := range numPoints {
+		pubKeys[i] = sw_bls12381.NewG1Affine(points[i])
+	}
+
+	var bitlist [5]frontend.Variable
+	var participantIndices []int
+
+	if config.UseRandom {
+		bitlist, participantIndices = CreateBitlist(config.NumParticipants)
+	} else {
+		bitlist = CreateBitlistFromIndices(config.SpecificIndices)
+		participantIndices = config.SpecificIndices
+	}
+
+	participantSet := make(map[int]bool, len(participantIndices))
+	for _, idx := range participantIndices {
+		if idx >= 0 && idx < numPoints {
+			participantSet[idx] = true
+		}
+	}
+
+	expectedAPK := init
+	for i := range numPoints {
+		if participantSet[i] {
+			expectedAPK.Add(&expectedAPK, &points[i])
+		}
+	}
+
+	commitment := NativePublicKeysCommitment(points)
+
+	return &APKProofCircuit{
+		PublicKeys:           pubKeys,
+		Bitlist:              bitlist,
+		Seed:                 sw_bls12381.NewG1Affine(init),
+		PublicKeysCommitment: commitment,
+		ExpectedAPK:          sw_bls12381.NewG1Affine(expectedAPK),
+	}
 }

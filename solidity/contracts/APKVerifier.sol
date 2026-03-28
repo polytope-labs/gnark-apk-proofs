@@ -15,23 +15,15 @@
 
 pragma solidity ^0.8.28;
 
-/// @title Unified proof verifier interface.
-/// @dev Adapters for Groth16 and PLONK implement this so APKVerifier
-///      can work with either backend interchangeably.
-interface IProofVerifier {
-    function verifyProof(
-        bytes calldata proof,
-        uint256[30] memory publicInputs
-    ) external view returns (bool);
-}
+import "./PlonkVerifier.sol";
 
 /// @title APK Proof Verifier
-/// @notice Human-readable wrapper around the auto-generated gnark verifiers.
+/// @notice Human-readable wrapper around the auto-generated gnark PLONK verifier.
 /// @dev BLS12-381 G1 points are passed as 96-byte uncompressed serializations
 ///      (X: 48 bytes big-endian || Y: 48 bytes big-endian), matching the
 ///      standard gnark-crypto / EIP-2537 uncompressed G1 format.
 contract APKVerifier {
-    IProofVerifier public immutable verifier;
+    PlonkVerifier public immutable verifier;
 
     error InvalidG1PointLength();
     error G1AddFailed();
@@ -57,7 +49,7 @@ contract APKVerifier {
     }
 
     constructor(address _verifier) {
-        verifier = IProofVerifier(_verifier);
+        verifier = PlonkVerifier(_verifier);
     }
 
     /// @notice Verify a proof of APK aggregation.
@@ -68,7 +60,7 @@ contract APKVerifier {
         APKPublicInputs calldata inputs
     ) external view {
         uint256[30] memory encoded = _encodePublicInputs(inputs);
-        if (!verifier.verifyProof(proof, encoded)) {
+        if (!verifier.Verify(proof, encoded)) {
             revert ProofVerificationFailed();
         }
     }

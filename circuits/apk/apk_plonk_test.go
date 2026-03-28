@@ -23,8 +23,9 @@ import (
 	"github.com/consensys/gnark/backend/plonk"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/frontend/cs/scs"
-	"github.com/consensys/gnark/test/unsafekzg"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/polytope-labs/gnark-apk-proofs/circuits/srs"
 )
 
 func TestPlonkProveAndVerify(t *testing.T) {
@@ -37,16 +38,16 @@ func TestPlonkProveAndVerify(t *testing.T) {
 	assert.NoError(t, err, "Failed to compile circuit")
 	t.Logf("Circuit compiled in %v. Constraints: %d", compileTime, cs.GetNbConstraints())
 
-	t.Log("Generating KZG SRS...")
+	t.Log("Loading KZG SRS...")
 	startSRS := time.Now()
-	srs, srsLagrange, err := unsafekzg.NewSRS(cs)
+	kzgSrs, kzgSrsLag, err := srs.LoadDefault(23)
 	srsTime := time.Since(startSRS)
-	assert.NoError(t, err, "Failed to generate SRS")
-	t.Logf("SRS generated in %v", srsTime)
+	assert.NoError(t, err, "Failed to load SRS")
+	t.Logf("SRS loaded in %v", srsTime)
 
 	t.Log("Performing PLONK setup...")
 	startSetup := time.Now()
-	pk, vk, err := plonk.Setup(cs, srs, srsLagrange)
+	pk, vk, err := plonk.Setup(cs, kzgSrs, kzgSrsLag)
 	setupTime := time.Since(startSetup)
 	assert.NoError(t, err, "Failed to setup PLONK")
 	t.Logf("PLONK setup completed in %v", setupTime)
@@ -54,7 +55,7 @@ func TestPlonkProveAndVerify(t *testing.T) {
 	// Generate witness
 	t.Log("Generating witness data...")
 	startWitnessGen := time.Now()
-	witness := GenerateWitness(t, WitnessConfig{
+	witness := GenerateWitness(WitnessConfig{
 		NumParticipants: 10,
 		UseRandom:       true,
 		Seed:            42,

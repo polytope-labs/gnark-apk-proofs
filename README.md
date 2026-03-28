@@ -1,6 +1,6 @@
 # gnark-apk-proofs
 
-Zero-knowledge proofs for BLS G1 aggregated public key (APK) verification, built with [gnark](https://github.com/consensys/gnark). Supports both Groth16 and PLONK proving systems with on-chain Solidity verification via EIP-2537 precompiles.
+Zero-knowledge proofs for BLS G1 aggregated public key (APK) verification, built with [gnark](https://github.com/consensys/gnark). Uses the PLONK proving system with on-chain Solidity verification via EIP-2537 precompiles.
 
 ## Overview
 
@@ -22,15 +22,16 @@ gnark-apk-proofs/
 ├── circuits/                  # Go ZK circuit code
 │   ├── go.mod
 │   ├── apk/                   # APK proof circuit + tests
-│   └── ffi/                   # CGo exports for Rust FFI
+│   ├── ffi/                   # CGo exports for Rust FFI
+│   └── srs/                   # SRS download + caching from Filecoin ceremony
 ├── rust/                      # Rust proving library
 │   ├── ffi/                   # Low-level FFI bindings (builds Go into static archive)
-│   └── prover/                # Safe Rust API with builder pattern
+│   ├── prover/                # Safe Rust API with builder pattern
+│   └── verifier/              # Pure-Rust PLONK verifier (arkworks)
 ├── solidity/                  # Foundry/Solidity contracts
 │   ├── foundry.toml
 │   └── contracts/
-│       ├── Groth16Verifier.sol
-│       ├── PlonkVerifier.sol
+│       ├── PlonkVerifier.sol  # Auto-generated gnark PLONK verifier
 │       ├── APKVerifier.sol    # Human-readable wrapper
 │       └── test/              # Gas benchmarks + proof fixtures
 └── README.md
@@ -40,37 +41,32 @@ gnark-apk-proofs/
 
 **Circuit:** BLS G1 public key aggregation (1024 validators, Poseidon2 commitment)
 
-### Constraint Counts
+### Constraint Count
 
-| System  | Constraint Type | Count     |
-|---------|-----------------|-----------|
-| Groth16 | R1CS            | 3,316,047 |
-| PLONK   | SCS             | 7,097,960 |
+| System | Constraint Type | Count     |
+|--------|-----------------|-----------|
+| PLONK  | SCS             | 7,097,960 |
 
 ### Off-chain (Go)
 
-| Phase        | Groth16          | PLONK           |
-|--------------|------------------|-----------------|
-| Compile      | 15.6s            | 5.5s            |
-| SRS / Setup  | 1m 55s (trusted) | 44.8s (universal) |
-| Witness gen  | 157ms            | 157ms           |
-| Prove        | 6.0s             | 40.0s           |
-| Verify       | 2.6ms            | 3.3ms           |
+| Phase       | Time              |
+|-------------|-------------------|
+| Compile     | 5.5s              |
+| SRS / Setup | 44.8s (universal) |
+| Witness gen | 157ms             |
+| Prove       | 40.0s             |
+| Verify      | 3.3ms             |
 
 ### On-chain (Solidity, EIP-2537, Prague EVM)
 
-| Metric             | Groth16          | PLONK            |
-|--------------------|------------------|------------------|
-| Verification gas   | 547,162          | 385,183          |
-| Contract bytecode  | 9,006 bytes      | 11,607 bytes     |
-| Proof size         | 576 bytes        | 1,184 bytes      |
-| Public inputs      | 960 bytes (30 x uint256) | 960 bytes (30 x uint256) |
+| Metric            | Value                    |
+|-------------------|--------------------------|
+| Verification gas  | 385,183                  |
+| Contract bytecode | 11,607 bytes             |
+| Proof size        | 1,184 bytes              |
+| Public inputs     | 960 bytes (30 x uint256) |
 
-### Trade-offs
-
-- **Groth16**: ~6.6x faster proving, but ~42% more expensive on-chain verification. Requires a per-circuit trusted setup.
-- **PLONK**: Cheaper on-chain verification, universal SRS (no trusted setup), but slower proving.
-- Both require Pectra hardfork (EIP-2537 BLS12-381 precompiles).
+PLONK uses a universal SRS (no per-circuit trusted setup). Requires Pectra hardfork (EIP-2537 BLS12-381 precompiles).
 
 ## Rust Library
 
@@ -88,30 +84,35 @@ gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs" }
 ### Example
 
 ```rust
-use gnark_apk_prover::{APKProofBuilder, Backend, G1Affine, ProverContext};
+use gnark_apk_prover::{ProofBuilder, G1Affine, ProverContext};
 
-// One-time setup (expensive: ~2 min for Groth16, ~45s for PLONK)
-let ctx = ProverContext::setup(Backend::Groth16)?;
+// One-time setup (expensive: ~45s for PLONK)
+// SRS is cached at $HOME/.config/gnark-apk-proofs/srs (downloaded automatically on first run)
+let ctx = ProverContext::setup(None)?;
 
 // Build and generate a proof
-let proof = APKProofBuilder::new()
+let proof = ProofBuilder::new()
     .public_keys(validator_keys)   // Vec<G1Affine>, exactly 1024
     .participation(indices)         // Vec<u16>, participating validator indices
     .seed(seed_point)               // G1Affine
     .prove(&ctx)?;
 
-// proof.proof_bytes  — ready for Solidity verifier (576 bytes Groth16 / 1184 PLONK)
+// proof.proof_bytes  — ready for Solidity verifier (1184 bytes)
 // proof.public_inputs — 960 bytes (30 x uint256)
 ```
 
-### Run Rust tests
+### Build
 
 ```bash
-# Fast compile check
 cargo build
+```
 
-# Integration test (generates a real proof, ~2 min)
-cargo test -- --ignored
+### End-to-end test
+
+Generates a PLONK proof via Go FFI and verifies it with the pure-Rust verifier:
+
+```bash
+cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored
 ```
 
 ## Go Circuit
@@ -128,17 +129,16 @@ cd circuits
 go test -v -timeout 30m ./apk/
 ```
 
-### Generate Solidity verifiers and proof fixtures
+### Generate Solidity verifier and proof fixtures
 
 ```bash
 cd circuits
-go test -v -run "TestExportGroth16ForFoundry" -timeout 30m ./apk/
 go test -v -run "TestExportPlonkForFoundry" -timeout 30m ./apk/
 ```
 
 ## Solidity Verifiers
 
-The `APKVerifier` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It takes a single `IProofVerifier` backend (either `Groth16VerifierAdapter` or `PlonkVerifierAdapter`):
+The `APKVerifier` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It wraps the auto-generated `PlonkVerifier` directly:
 
 ```solidity
 apkVerifier.verify(proof, APKPublicInputs({

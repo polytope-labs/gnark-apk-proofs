@@ -24,7 +24,7 @@ import (
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fr"
 	"github.com/consensys/gnark/frontend"
-	"github.com/consensys/gnark/frontend/cs/r1cs"
+	"github.com/consensys/gnark/frontend/cs/scs"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/math/emulated"
@@ -35,7 +35,7 @@ import (
 func createBitlist(numBitsToSet int) ([5]frontend.Variable, []int) {
 	bitlist := [5]frontend.Variable{}
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		bitlist[i] = new(big.Int)
 	}
 
@@ -133,7 +133,7 @@ func testSimpleAPKG1(t *testing.T, numParticipants int) (circ, wit frontend.Circ
 // TestCircuitCompiles verifies the APK circuit compiles correctly.
 func TestCircuitCompiles(t *testing.T) {
 	circuit := &APKProofCircuit{}
-	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), r1cs.NewBuilder, circuit)
+	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, circuit)
 	if err != nil {
 		t.Fatalf("Circuit compilation failed: %v", err)
 	}

@@ -16,12 +16,23 @@
 pub use ark_bls12_381::G1Affine;
 use ark_ec::AffineRepr;
 use ark_ff::PrimeField;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
-use gnark_apk_ffi::{APKFreeHandle, APKFreeResult, APKProve, APKSetup, CProveResult};
+use gnark_apk_ffi::{APKExportVK, APKFreeBuffer, APKFreeHandle, APKFreeResult, APKProve, APKSetup, CBuffer, CProveResult};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing;
 
 /// Number of validators in the circuit.
 pub const NUM_VALIDATORS: usize = 1024;
+
+/// Returns the default SRS directory: `$HOME/.config/gnark-apk-proofs/srs`.
+pub fn default_srs_dir() -> PathBuf {
+    PathBuf::from(std::env::var("HOME").expect("HOME environment variable not set"))
+        .join(".config/gnark-apk-proofs/srs")
+}
 
 
 #[derive(Error, Debug)]
@@ -43,23 +54,13 @@ pub enum APKProverError {
 }
 
 
-/// Proving backend selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum Backend {
-    Groth16 = 0,
-    Plonk = 1,
-}
-
 /// A generated proof ready for on-chain verification.
 #[derive(Clone, Debug)]
 pub struct APKProof {
-    /// Serialized proof bytes (576 for Groth16, 1184 for PLONK).
+    /// Serialized proof bytes (1184 bytes PLONK).
     pub proof_bytes: Vec<u8>,
     /// Serialized public inputs (960 bytes = 30 x uint256).
     pub public_inputs: Vec<u8>,
-    /// Which backend was used.
-    pub backend: Backend,
 }
 
 
@@ -67,27 +68,53 @@ pub struct APKProof {
 /// Drop frees the Go-side resources.
 pub struct ProverContext {
     handle: u64,
-    backend: Backend,
 }
 
 impl ProverContext {
-    /// Perform circuit compilation and trusted setup.
-    /// This is expensive (~2 min for Groth16, ~45s for PLONK).
-    pub fn setup(backend: Backend) -> Result<Self, APKProverError> {
-        let handle = unsafe { APKSetup(backend as u8) };
+    /// Perform circuit compilation and PLONK key generation.
+    ///
+    /// `srs_dir` should point to the directory containing
+    /// `plonk_srs.canonical` and `plonk_srs.lagrange` files. If `None`,
+    /// defaults to `$HOME/.config/gnark-apk-proofs/srs` (the Go side will
+    /// download from the Filecoin ceremony if the files are missing).
+    pub fn setup(srs_dir: Option<&Path>) -> Result<Self, APKProverError> {
+        let default_dir = srs_dir.is_none().then(|| default_srs_dir());
+        let effective_dir = srs_dir.or(default_dir.as_deref());
+
+        let c_srs_dir = effective_dir
+            .map(|p| CString::new(p.to_str().expect("srs_dir must be valid UTF-8")))
+            .transpose()
+            .map_err(|_| APKProverError::SetupFailed)?;
+
+        let srs_ptr = c_srs_dir
+            .as_ref()
+            .map(|s| s.as_ptr())
+            .unwrap_or(std::ptr::null());
+
+        let handle = unsafe { APKSetup(srs_ptr) };
         if handle == 0 {
             return Err(APKProverError::SetupFailed);
         }
-        Ok(Self { handle, backend })
+        Ok(Self { handle })
     }
 
-    pub fn backend(&self) -> Backend {
-        self.backend
+    /// Export the PLONK verifying key in gnark's binary format.
+    pub fn export_vk(&self) -> Result<Vec<u8>, APKProverError> {
+        let mut buf = CBuffer::default();
+        let ret = unsafe { APKExportVK(self.handle, &mut buf) };
+        if ret != 0 {
+            return Err(APKProverError::SetupFailed);
+        }
+        let data = unsafe {
+            std::slice::from_raw_parts(buf.data, buf.len as usize).to_vec()
+        };
+        unsafe { APKFreeBuffer(&mut buf) };
+        Ok(data)
     }
 
     /// Prove from pre-serialized witness bytes (FFI wire format).
     pub fn prove_raw(&self, witness: &[u8]) -> Result<APKProof, APKProverError> {
-        prove_ffi(self.handle, self.backend, witness)
+        prove_ffi(self.handle, witness)
     }
 }
 
@@ -157,7 +184,7 @@ impl ProofBuilder {
         }
 
         let witness = serialize_witness(&public_keys, &participation, &seed);
-        prove_ffi(ctx.handle, ctx.backend, &witness)
+        prove_ffi(ctx.handle, &witness)
     }
 }
 
@@ -169,7 +196,7 @@ impl Default for ProofBuilder {
 
 
 /// Call the Go FFI prover and collect the result.
-fn prove_ffi(handle: u64, backend: Backend, witness: &[u8]) -> Result<APKProof, APKProverError> {
+fn prove_ffi(handle: u64, witness: &[u8]) -> Result<APKProof, APKProverError> {
     let mut result = CProveResult::default();
     let ret = unsafe {
         APKProve(handle, witness.as_ptr(), witness.len() as u32, &mut result)
@@ -200,7 +227,6 @@ fn prove_ffi(handle: u64, backend: Backend, witness: &[u8]) -> Result<APKProof, 
     Ok(APKProof {
         proof_bytes,
         public_inputs,
-        backend,
     })
 }
 

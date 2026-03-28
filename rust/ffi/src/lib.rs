@@ -35,7 +35,7 @@ impl Default for CProveResult {
 }
 
 extern "C" {
-    pub fn APKSetup(backend: u8) -> u64;
+    pub fn APKSetup(srs_dir: *const std::ffi::c_char) -> u64;
     pub fn APKFreeHandle(handle: u64);
 
     pub fn APKProve(
@@ -47,7 +47,7 @@ extern "C" {
 
     pub fn APKFreeResult(result: *mut CProveResult);
 
-    pub fn APKGenerateTestWitness(num_participants: u32, seed: i64, result: *mut CBuffer) -> i32;
+    pub fn APKExportVK(handle: u64, result: *mut CBuffer) -> i32;
 
     pub fn APKFreeBuffer(buf: *mut CBuffer);
 }

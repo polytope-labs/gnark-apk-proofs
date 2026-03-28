@@ -16,10 +16,7 @@
 pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
-import "../Groth16Verifier.sol";
 import "../PlonkVerifier.sol";
-import "../Groth16VerifierAdapter.sol";
-import "../PlonkVerifierAdapter.sol";
 import "../APKVerifier.sol";
 
 contract VerifierGasTest is Test {
@@ -30,20 +27,12 @@ contract VerifierGasTest is Test {
     /// EIP-2537 G1ADD precompile
     uint256 constant PRECOMPILE_BLS12_G1ADD = 0x0b;
 
-    Verifier groth16Verifier;
     PlonkVerifier plonkVerifier;
-    Groth16VerifierAdapter groth16Adapter;
-    PlonkVerifierAdapter plonkAdapter;
-    APKVerifier groth16APKVerifier;
-    APKVerifier plonkAPKVerifier;
+    APKVerifier apkVerifier;
 
     function setUp() public {
-        groth16Verifier = new Verifier();
         plonkVerifier = new PlonkVerifier();
-        groth16Adapter = new Groth16VerifierAdapter(address(groth16Verifier));
-        plonkAdapter = new PlonkVerifierAdapter(address(plonkVerifier));
-        groth16APKVerifier = new APKVerifier(address(groth16Adapter));
-        plonkAPKVerifier = new APKVerifier(address(plonkAdapter));
+        apkVerifier = new APKVerifier(address(plonkVerifier));
     }
 
     function _loadRawInputs(bytes memory pubData) internal pure returns (uint256[30] memory input) {
@@ -177,31 +166,6 @@ contract VerifierGasTest is Test {
         inputs.apk = _subtractSeed(expectedAPK, inputs.seed);
     }
 
-    function test_groth16_verify_raw() public {
-        bytes memory proofData = vm.readFileBinary("contracts/test/fixtures/groth16_proof.bin");
-        bytes memory pubData = vm.readFileBinary("contracts/test/fixtures/groth16_public.bin");
-        uint256[30] memory input = _loadRawInputs(pubData);
-
-        uint256 gasBefore = gasleft();
-        groth16Verifier.verifyProof(proofData, input);
-        uint256 gasUsed = gasBefore - gasleft();
-
-        emit log_named_uint("Groth16 verification gas (raw)", gasUsed);
-    }
-
-    function test_groth16_verify_wrapper() public {
-        bytes memory proofData = vm.readFileBinary("contracts/test/fixtures/groth16_proof.bin");
-        bytes memory pubData = vm.readFileBinary("contracts/test/fixtures/groth16_public.bin");
-        uint256[30] memory raw = _loadRawInputs(pubData);
-        APKVerifier.APKPublicInputs memory inputs = _buildStructuredInputs(raw);
-
-        uint256 gasBefore = gasleft();
-        groth16APKVerifier.verify(proofData, inputs);
-        uint256 gasUsed = gasBefore - gasleft();
-
-        emit log_named_uint("Groth16 verification gas (wrapper)", gasUsed);
-    }
-
     function test_plonk_verify_raw() public {
         bytes memory proofData = vm.readFileBinary("contracts/test/fixtures/plonk_proof.bin");
         bytes memory pubData = vm.readFileBinary("contracts/test/fixtures/plonk_public.bin");
@@ -222,17 +186,14 @@ contract VerifierGasTest is Test {
         APKVerifier.APKPublicInputs memory inputs = _buildStructuredInputs(raw);
 
         uint256 gasBefore = gasleft();
-        plonkAPKVerifier.verify(proofData, inputs);
+        apkVerifier.verify(proofData, inputs);
         uint256 gasUsed = gasBefore - gasleft();
 
         emit log_named_uint("PLONK verification gas (wrapper)", gasUsed);
     }
 
     function test_contract_sizes() public {
-        emit log_named_uint("Groth16 bytecode size", address(groth16Verifier).code.length);
         emit log_named_uint("PLONK bytecode size", address(plonkVerifier).code.length);
-        emit log_named_uint("Groth16 adapter bytecode size", address(groth16Adapter).code.length);
-        emit log_named_uint("PLONK adapter bytecode size", address(plonkAdapter).code.length);
-        emit log_named_uint("APKVerifier bytecode size", address(groth16APKVerifier).code.length);
+        emit log_named_uint("APKVerifier bytecode size", address(apkVerifier).code.length);
     }
 }

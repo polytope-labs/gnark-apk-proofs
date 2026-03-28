@@ -65,7 +65,7 @@ func (circuit *APKProofCircuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	for i := 0; i < 1024; i++ {
+	for i := range 1024 {
 		hasher.Write(circuit.PublicKeys[i].X.Limbs...)
 		hasher.Write(circuit.PublicKeys[i].Y.Limbs...)
 	}
@@ -87,7 +87,7 @@ func (circuit *APKProofCircuit) Define(api frontend.API) error {
 	// Note: on-curve and subgroup checks are performed by validators at
 	// registration time (conditional NP relation / PoP assumption).
 	apk := &circuit.Seed
-	for i := 0; i < 1024; i++ {
+	for i := range 1024 {
 		temp := curve.AddUnified(apk, &circuit.PublicKeys[i])
 		apk = curve.Select(bits[i], temp, apk)
 	}
