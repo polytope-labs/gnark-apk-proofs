@@ -19,13 +19,12 @@ import "./PlonkVerifier.sol";
 
 /// @title APK Proof Verifier
 /// @notice Human-readable wrapper around the auto-generated gnark PLONK verifier.
-/// @dev BLS12-381 G1 points are passed as 96-byte uncompressed serializations
-///      (X: 48 bytes big-endian || Y: 48 bytes big-endian), matching the
+/// @dev BLS12-381 G1 points are passed as `bytes32[3]` (96 bytes total):
+///      X (48 bytes big-endian) || Y (48 bytes big-endian), matching the
 ///      standard gnark-crypto / EIP-2537 uncompressed G1 format.
-contract APKVerifier {
+contract ApkProof {
     PlonkVerifier public immutable verifier;
 
-    error InvalidG1PointLength();
     error G1AddFailed();
     error ProofVerificationFailed();
 
@@ -41,11 +40,11 @@ contract APKVerifier {
         uint256 publicKeysCommitment;
         /// Seed point for aggregation (must be on curve but NOT in G1 subgroup).
         /// 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
-        bytes seed;
+        bytes32[3] seed;
         /// Aggregate public key of participating validators: apk = sum(b_i * pk_i).
         /// 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
         /// Note: The circuit expects seed + apk; the contract adds the seed automatically.
-        bytes apk;
+        bytes32[3] apk;
     }
 
     constructor(address _verifier) {
@@ -95,28 +94,26 @@ contract APKVerifier {
     }
 
     /// @dev Add two BLS12-381 G1 points using the EIP-2537 G1ADD precompile.
-    /// @param a First G1 point (96 bytes uncompressed).
-    /// @param b Second G1 point (96 bytes uncompressed).
+    /// @param a First G1 point (bytes32[3] = 96 bytes uncompressed).
+    /// @param b Second G1 point (bytes32[3] = 96 bytes uncompressed).
     /// @return result The padded result (128 bytes: 64-byte X || 64-byte Y).
     function _g1Add(
-        bytes calldata a,
-        bytes calldata b
+        bytes32[3] calldata a,
+        bytes32[3] calldata b
     ) internal view returns (bytes memory result) {
-        if (a.length != 96 || b.length != 96) revert InvalidG1PointLength();
-
         // G1ADD input: two padded G1 points (128 bytes each) = 256 bytes
         // Padded format: 16 zero bytes || X (48 bytes) || 16 zero bytes || Y (48 bytes)
         bytes memory input = new bytes(256);
         assembly {
             let ptr := add(input, 32)
-            // Point a: pad X
-            calldatacopy(add(ptr, 16), a.offset, 48)
-            // Point a: pad Y
-            calldatacopy(add(ptr, 80), add(a.offset, 48), 48)
+            // Point a: pad X (48 bytes from calldata offset a)
+            calldatacopy(add(ptr, 16), a, 48)
+            // Point a: pad Y (48 bytes from calldata offset a+48)
+            calldatacopy(add(ptr, 80), add(a, 48), 48)
             // Point b: pad X
-            calldatacopy(add(ptr, 144), b.offset, 48)
+            calldatacopy(add(ptr, 144), b, 48)
             // Point b: pad Y
-            calldatacopy(add(ptr, 208), add(b.offset, 48), 48)
+            calldatacopy(add(ptr, 208), add(b, 48), 48)
         }
 
         result = new bytes(128);
@@ -146,31 +143,20 @@ contract APKVerifier {
         _fpMemBytesToLimbs(point, 80, out, offset + 6);
     }
 
-    /// @dev Parse a 96-byte uncompressed G1 point (calldata) into 12 x 64-bit limbs.
+    /// @dev Parse a 96-byte uncompressed G1 point (bytes32[3] calldata) into 12 x 64-bit limbs.
+    ///      The three words are contiguous in calldata: bytes[0:48] = X, bytes[48:96] = Y.
     function _g1BytesToLimbs(
-        bytes calldata point,
-        uint256[30] memory out,
-        uint256 offset
-    ) internal pure {
-        if (point.length != 96) revert InvalidG1PointLength();
-        _fpCalldataBytesToLimbs(point[0:48], out, offset);
-        _fpCalldataBytesToLimbs(point[48:96], out, offset + 6);
-    }
-
-    /// @dev Convert a 48-byte big-endian Fp element (from calldata) into
-    ///      6 x 64-bit limbs in little-endian order.
-    function _fpCalldataBytesToLimbs(
-        bytes calldata fp,
+        bytes32[3] calldata point,
         uint256[30] memory out,
         uint256 offset
     ) internal pure {
         uint256 hi;
         uint256 lo;
+
+        // X coordinate (bytes[0:48])
         assembly {
-            // hi = bytes[0..31]: bits[255..192]=bytes[0..8], bits[191..128]=bytes[8..16]
-            hi := calldataload(fp.offset)
-            // lo = bytes[16..47]: bits[255..192]=bytes[16..24], ..., bits[63..0]=bytes[40..48]
-            lo := calldataload(add(fp.offset, 16))
+            hi := calldataload(point)
+            lo := calldataload(add(point, 16))
         }
         out[offset]     = lo & 0xFFFFFFFFFFFFFFFF;
         out[offset + 1] = (lo >> 64) & 0xFFFFFFFFFFFFFFFF;
@@ -178,6 +164,18 @@ contract APKVerifier {
         out[offset + 3] = (lo >> 192) & 0xFFFFFFFFFFFFFFFF;
         out[offset + 4] = (hi >> 128) & 0xFFFFFFFFFFFFFFFF;
         out[offset + 5] = (hi >> 192) & 0xFFFFFFFFFFFFFFFF;
+
+        // Y coordinate (bytes[48:96])
+        assembly {
+            hi := calldataload(add(point, 48))
+            lo := calldataload(add(point, 64))
+        }
+        out[offset + 6]  = lo & 0xFFFFFFFFFFFFFFFF;
+        out[offset + 7]  = (lo >> 64) & 0xFFFFFFFFFFFFFFFF;
+        out[offset + 8]  = (lo >> 128) & 0xFFFFFFFFFFFFFFFF;
+        out[offset + 9]  = (lo >> 192) & 0xFFFFFFFFFFFFFFFF;
+        out[offset + 10] = (hi >> 128) & 0xFFFFFFFFFFFFFFFF;
+        out[offset + 11] = (hi >> 192) & 0xFFFFFFFFFFFFFFFF;
     }
 
     /// @dev Convert a 48-byte big-endian Fp element (from memory at given start offset)
