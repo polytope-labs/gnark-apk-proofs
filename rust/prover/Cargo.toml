@@ -9,6 +9,7 @@ test-utils = ["ark-std"]
 
 [dependencies]
 gnark-apk-ffi = { path = "../ffi" }
+gnark-plonk-verifier = { path = "../verifier" }
 ark-bls12-381 = "0.5"
 ark-ec = "0.5"
 ark-ff = "0.5"

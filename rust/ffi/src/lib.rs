@@ -35,31 +35,15 @@ impl Default for CProveResult {
 }
 
 extern "C" {
-	pub fn APKSetup(srs_dir: *const std::ffi::c_char) -> u64;
-	pub fn APKFreeHandle(handle: u64);
+	pub fn ApkSetup(srs_dir: *const std::ffi::c_char) -> u64;
+	pub fn ApkFreeHandle(handle: u64);
 
-	pub fn APKProve(
+	pub fn ApkProve(
 		handle: u64,
 		witness_data: *const u8,
 		witness_len: u32,
 		result: *mut CProveResult,
 	) -> i32;
 
-	pub fn APKFreeResult(result: *mut CProveResult);
-
-	pub fn APKExportVK(handle: u64, result: *mut CBuffer) -> i32;
-
-	pub fn APKFreeBuffer(buf: *mut CBuffer);
-}
-
-#[repr(C)]
-pub struct CBuffer {
-	pub data: *const u8,
-	pub len: u32,
-}
-
-impl Default for CBuffer {
-	fn default() -> Self {
-		Self { data: std::ptr::null(), len: 0 }
-	}
+	pub fn ApkFreeResult(result: *mut CProveResult);
 }

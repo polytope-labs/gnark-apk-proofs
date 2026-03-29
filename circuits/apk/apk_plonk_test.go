@@ -29,7 +29,7 @@ import (
 )
 
 func TestPlonkProveAndVerify(t *testing.T) {
-	circuit := APKProofCircuit{}
+	circuit := ApkProofCircuit{}
 
 	t.Log("Compiling circuit (SCS)...")
 	startCompile := time.Now()

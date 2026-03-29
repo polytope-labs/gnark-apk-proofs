@@ -16,7 +16,9 @@
 package apk
 
 import (
+	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +31,35 @@ import (
 	"github.com/polytope-labs/gnark-apk-proofs/circuits/srs"
 )
 
+// patchPlonkVerifier rewrites the generated PlonkVerifier.sol to use a
+// fixed-size public inputs array (uint256[N]) instead of a dynamic one.
+// The verifier already asserts the length at runtime via check_number_of_public_inputs,
+// so this makes the guarantee compile-time and avoids the ABI length prefix.
+func patchPlonkVerifier(path string, nbPublicInputs int) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	src := string(data)
+
+	fixed := fmt.Sprintf("uint256[%d]", nbPublicInputs)
+
+	// 1. Change signature: uint256[] calldata -> uint256[N] calldata
+	src = strings.Replace(src,
+		"uint256[] calldata public_inputs",
+		fixed+" calldata public_inputs", 1)
+
+	// 2. Replace public_inputs.length with the constant (fixed arrays have no .length in assembly)
+	src = strings.ReplaceAll(src, "public_inputs.length", "VK_NB_PUBLIC_INPUTS")
+
+	// 3. Replace public_inputs.offset with public_inputs (bare name gives calldata offset for fixed arrays)
+	src = strings.ReplaceAll(src, "public_inputs.offset", "public_inputs")
+
+	return os.WriteFile(path, []byte(src), 0644)
+}
+
 func TestExportSolidityVerifierPlonk(t *testing.T) {
-	circuit := APKProofCircuit{}
+	circuit := ApkProofCircuit{}
 
 	t.Log("Compiling circuit (SCS)...")
 	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, &circuit)
@@ -58,10 +87,13 @@ func TestExportSolidityVerifierPlonk(t *testing.T) {
 
 	file, err := os.Create(outputPath)
 	assert.NoError(t, err, "Failed to create Solidity file")
-	defer file.Close()
 
 	err = vk.ExportSolidity(file)
+	file.Close()
 	assert.NoError(t, err, "Failed to export Solidity verifier")
+
+	err = patchPlonkVerifier(outputPath, 18)
+	assert.NoError(t, err, "Failed to patch PlonkVerifier")
 
 	info, err := os.Stat(outputPath)
 	assert.NoError(t, err)
@@ -71,7 +103,7 @@ func TestExportSolidityVerifierPlonk(t *testing.T) {
 // TestExportPlonkForFoundry generates a PLONK verifier contract and a matching
 // proof + public inputs for use in Foundry gas benchmarks.
 func TestExportPlonkForFoundry(t *testing.T) {
-	circuit := APKProofCircuit{}
+	circuit := ApkProofCircuit{}
 	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, &circuit)
 	assert.NoError(t, err)
 	t.Logf("SCS constraints: %d", cs.GetNbConstraints())
@@ -88,6 +120,9 @@ func TestExportPlonkForFoundry(t *testing.T) {
 	assert.NoError(t, err)
 	err = vk.ExportSolidity(f)
 	f.Close()
+	assert.NoError(t, err)
+
+	err = patchPlonkVerifier("../../solidity/contracts/PlonkVerifier.sol", 18)
 	assert.NoError(t, err)
 	t.Log("Exported PlonkVerifier.sol")
 

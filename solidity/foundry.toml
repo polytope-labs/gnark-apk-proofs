@@ -1,8 +1,8 @@
 [profile.default]
 src = "contracts"
 out = "out"
-test = "contracts/test"
+test = "test"
 libs = ["lib"]
 evm_version = "prague"
 solc_version = "0.8.28"
-fs_permissions = [{ access = "read", path = "contracts/test/fixtures" }]
+fs_permissions = [{ access = "read", path = "test/fixtures" }]
