@@ -225,7 +225,7 @@ type WitnessConfig struct {
 	Seed            int64 // Random seed for reproducibility
 }
 
-func GenerateWitness(config WitnessConfig) *APKProofCircuit {
+func GenerateWitness(config WitnessConfig) *ApkProofCircuit {
 	if config.Seed != 0 {
 		rand.Seed(config.Seed)
 	}
@@ -234,11 +234,7 @@ func GenerateWitness(config WitnessConfig) *APKProofCircuit {
 
 	_, _, G, _ := bls12381.Generators()
 
-	var seed fr.Element
-	seed.SetRandom()
-
-	var init bls12381.G1Affine
-	init.ScalarMultiplication(&G, seed.BigInt(new(big.Int)))
+	init := ProtocolSeed()
 
 	points := make([]bls12381.G1Affine, numPoints)
 	for i := range numPoints {
@@ -269,20 +265,19 @@ func GenerateWitness(config WitnessConfig) *APKProofCircuit {
 		}
 	}
 
-	expectedAPK := init
+	expectedApk := init
 	for i := range numPoints {
 		if participantSet[i] {
-			expectedAPK.Add(&expectedAPK, &points[i])
+			expectedApk.Add(&expectedApk, &points[i])
 		}
 	}
 
 	commitment := NativePublicKeysCommitment(points)
 
-	return &APKProofCircuit{
+	return &ApkProofCircuit{
 		PublicKeys:           pubKeys,
 		Bitlist:              bitlist,
-		Seed:                 sw_bls12381.NewG1Affine(init),
 		PublicKeysCommitment: commitment,
-		ExpectedAPK:          sw_bls12381.NewG1Affine(expectedAPK),
+		ExpectedApk:          sw_bls12381.NewG1Affine(expectedApk),
 	}
 }

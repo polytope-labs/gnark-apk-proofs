@@ -16,16 +16,12 @@
 pub use ark_bls12_381::G1Affine;
 use ark_ec::AffineRepr;
 use ark_ff::PrimeField;
+use gnark_apk_ffi::{ApkFreeHandle, ApkFreeResult, ApkProve, ApkSetup, CProveResult};
 use std::{
 	ffi::CString,
 	path::{Path, PathBuf},
 };
 use thiserror::Error;
-
-use gnark_apk_ffi::{
-	APKExportVK, APKFreeBuffer, APKFreeHandle, APKFreeResult, APKProve, APKSetup, CBuffer,
-	CProveResult,
-};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
@@ -40,14 +36,14 @@ pub fn default_srs_dir() -> PathBuf {
 }
 
 #[derive(Error, Debug)]
-pub enum APKProverError {
+pub enum ApkProverError {
 	#[error("setup failed (circuit compilation or key generation)")]
 	SetupFailed,
 
 	#[error("missing required field: {0}")]
 	MissingField(&'static str),
 
-	#[error("expected 1024 public keys, got {0}")]
+	#[error("expected at most 1024 public keys, got {0}")]
 	InvalidPublicKeyCount(usize),
 
 	#[error("participant index {0} out of range (0..1023)")]
@@ -55,21 +51,44 @@ pub enum APKProverError {
 
 	#[error("proving failed: {0}")]
 	ProvingFailed(String),
+
+	#[error("failed to read VK from disk: {0}")]
+	VkReadFailed(#[from] std::io::Error),
+
+	#[error("failed to parse VK: {0}")]
+	VkParseFailed(#[from] gnark_plonk_verifier::VerifierError),
 }
 
-/// A generated proof ready for on-chain verification.
+/// A generated proof ready for on-chain or off-chain verification.
 #[derive(Clone, Debug)]
-pub struct APKProof {
-	/// Serialized proof bytes (1184 bytes PLONK).
-	pub proof_bytes: Vec<u8>,
-	/// Serialized public inputs (960 bytes = 30 x uint256).
-	pub public_inputs: Vec<u8>,
+pub struct ApkProof {
+	/// Parsed PLONK proof.
+	pub proof: gnark_plonk_verifier::PlonkProof,
+	/// Parsed public inputs as field elements.
+	pub public_inputs: Vec<gnark_plonk_verifier::Fr>,
+	/// Raw proof bytes from gnark's MarshalSolidity.
+	solidity_proof: Vec<u8>,
+	/// Raw public inputs bytes (32 bytes big-endian per element).
+	solidity_public_inputs: Vec<u8>,
+}
+
+impl ApkProof {
+	/// Serialized proof bytes for the Solidity verifier (1184 bytes).
+	pub fn proof_calldata(&self) -> &[u8] {
+		&self.solidity_proof
+	}
+
+	/// Serialized public inputs for the Solidity verifier (32 bytes big-endian per element).
+	pub fn public_inputs_calldata(&self) -> &[u8] {
+		&self.solidity_public_inputs
+	}
 }
 
 /// Holds the proving/verifying keys from a one-time setup.
 /// Drop frees the Go-side resources.
 pub struct ProverContext {
 	handle: u64,
+	srs_dir: PathBuf,
 }
 
 impl ProverContext {
@@ -77,47 +96,41 @@ impl ProverContext {
 	///
 	/// `srs_dir` should point to the directory containing
 	/// `plonk_srs.canonical` and `plonk_srs.lagrange` files. If `None`,
-	/// defaults to `$HOME/.config/gnark-apk-proofs/srs` (the Go side will
-	/// download from the Filecoin ceremony if the files are missing).
-	pub fn setup(srs_dir: Option<&Path>) -> Result<Self, APKProverError> {
+	/// defaults to `$HOME/.config/gnark-apk-proofs/srs`
+	///
+	/// (the Go side will download from the Filecoin ceremony if the files are missing).
+	pub fn setup(srs_dir: Option<&Path>) -> Result<Self, ApkProverError> {
 		let default_dir = srs_dir.is_none().then(default_srs_dir);
 		let effective_dir = srs_dir.or(default_dir.as_deref());
 
 		let c_srs_dir = effective_dir
 			.map(|p| CString::new(p.to_str().expect("srs_dir must be valid UTF-8")))
 			.transpose()
-			.map_err(|_| APKProverError::SetupFailed)?;
+			.map_err(|_| ApkProverError::SetupFailed)?;
 
 		let srs_ptr = c_srs_dir.as_ref().map(|s| s.as_ptr()).unwrap_or(std::ptr::null());
 
-		let handle = unsafe { APKSetup(srs_ptr) };
+		let resolved_dir = effective_dir.map(|p| p.to_path_buf()).unwrap_or_else(default_srs_dir);
+
+		let handle = unsafe { ApkSetup(srs_ptr) };
 		if handle == 0 {
-			return Err(APKProverError::SetupFailed);
+			return Err(ApkProverError::SetupFailed);
 		}
-		Ok(Self { handle })
+		Ok(Self { handle, srs_dir: resolved_dir })
 	}
 
-	/// Export the PLONK verifying key in gnark's binary format.
-	pub fn export_vk(&self) -> Result<Vec<u8>, APKProverError> {
-		let mut buf = CBuffer::default();
-		let ret = unsafe { APKExportVK(self.handle, &mut buf) };
-		if ret != 0 {
-			return Err(APKProverError::SetupFailed);
-		}
-		let data = unsafe { std::slice::from_raw_parts(buf.data, buf.len as usize).to_vec() };
-		unsafe { APKFreeBuffer(&mut buf) };
-		Ok(data)
-	}
-
-	/// Prove from pre-serialized witness bytes (FFI wire format).
-	pub fn prove_raw(&self, witness: &[u8]) -> Result<APKProof, APKProverError> {
-		prove_ffi(self.handle, witness)
+	/// Load the PLONK verifying key from the cached file on disk.
+	/// The VK is written to `<srs_dir>/plonk_vk.bin` during setup.
+	pub fn verifying_key(&self) -> Result<gnark_plonk_verifier::VerifyingKey, ApkProverError> {
+		let vk_path = self.srs_dir.join("plonk_vk.bin");
+		let bytes = std::fs::read(&vk_path)?;
+		Ok(gnark_plonk_verifier::VerifyingKey::try_from(bytes.as_slice())?)
 	}
 }
 
 impl Drop for ProverContext {
 	fn drop(&mut self) {
-		unsafe { APKFreeHandle(self.handle) };
+		unsafe { ApkFreeHandle(self.handle) };
 	}
 }
 
@@ -125,19 +138,19 @@ impl Drop for ProverContext {
 // Not Sync because gnark proving is not thread-safe for a single PK.
 unsafe impl Send for ProverContext {}
 
-/// Builder for constructing and proving APK proofs.
-pub struct ProofBuilder {
+/// Builder for constructing and proving Apk proofs.
+pub struct ProofBuilder<'a> {
+	ctx: &'a ProverContext,
 	public_keys: Option<Vec<G1Affine>>,
 	participation: Option<Vec<u16>>,
-	seed: Option<G1Affine>,
 }
 
-impl ProofBuilder {
-	pub fn new() -> Self {
-		Self { public_keys: None, participation: None, seed: None }
+impl<'a> ProofBuilder<'a> {
+	pub fn new(ctx: &'a ProverContext) -> Self {
+		Self { ctx, public_keys: None, participation: None }
 	}
 
-	/// Set the full validator public key set (must be exactly 1024).
+	/// Set the validator public key set (at most 1024; padded to 1024 with identity).
 	pub fn public_keys(mut self, keys: Vec<G1Affine>) -> Self {
 		self.public_keys = Some(keys);
 		self
@@ -149,78 +162,107 @@ impl ProofBuilder {
 		self
 	}
 
-	/// Set the seed point for aggregation.
-	pub fn seed(mut self, seed: G1Affine) -> Self {
-		self.seed = Some(seed);
-		self
-	}
-
-	/// Generate the proof using the given prover context.
-	pub fn prove(self, ctx: &ProverContext) -> Result<APKProof, APKProverError> {
-		let public_keys = self.public_keys.ok_or(APKProverError::MissingField("public_keys"))?;
+	/// Generate the proof.
+	///
+	/// If fewer than 1024 public keys are provided, the remaining slots are
+	/// padded with the identity point. Participation indices are validated
+	/// against the actual number of keys provided.
+	pub fn prove(self) -> Result<ApkProof, ApkProverError> {
+		let mut public_keys =
+			self.public_keys.ok_or(ApkProverError::MissingField("public_keys"))?;
 		let participation =
-			self.participation.ok_or(APKProverError::MissingField("participation"))?;
-		let seed = self.seed.ok_or(APKProverError::MissingField("seed"))?;
+			self.participation.ok_or(ApkProverError::MissingField("participation"))?;
 
-		if public_keys.len() != NUM_VALIDATORS {
-			return Err(APKProverError::InvalidPublicKeyCount(public_keys.len()));
+		let num_keys = public_keys.len();
+		if num_keys > NUM_VALIDATORS {
+			return Err(ApkProverError::InvalidPublicKeyCount(num_keys));
 		}
 
 		for &idx in &participation {
-			if idx as usize >= NUM_VALIDATORS {
-				return Err(APKProverError::InvalidParticipantIndex(idx));
+			if idx as usize >= num_keys {
+				return Err(ApkProverError::InvalidParticipantIndex(idx));
 			}
 		}
 
-		let witness = serialize_witness(&public_keys, &participation, &seed);
-		prove_ffi(ctx.handle, &witness)
-	}
-}
+		// Pad to 1024 with identity points for unused slots.
+		public_keys.resize(NUM_VALIDATORS, G1Affine::identity());
 
-impl Default for ProofBuilder {
-	fn default() -> Self {
-		Self::new()
-	}
-}
+		let witness = serialize_witness(&public_keys, &participation);
 
-/// Call the Go FFI prover and collect the result.
-fn prove_ffi(handle: u64, witness: &[u8]) -> Result<APKProof, APKProverError> {
-	let mut result = CProveResult::default();
-	let ret = unsafe { APKProve(handle, witness.as_ptr(), witness.len() as u32, &mut result) };
-
-	if ret != 0 || !result.error.is_null() {
-		let msg = if result.error.is_null() {
-			"unknown error".to_string()
-		} else {
-			let c_str = unsafe { std::ffi::CStr::from_ptr(result.error) };
-			let msg = c_str.to_string_lossy().into_owned();
-			unsafe { APKFreeResult(&mut result) };
-			msg
+		let mut result = CProveResult::default();
+		let ret = unsafe {
+			ApkProve(self.ctx.handle, witness.as_ptr(), witness.len() as u32, &mut result)
 		};
-		return Err(APKProverError::ProvingFailed(msg));
+
+		if ret != 0 || !result.error.is_null() {
+			let msg = if result.error.is_null() {
+				"unknown error".to_string()
+			} else {
+				let c_str = unsafe { std::ffi::CStr::from_ptr(result.error) };
+				let msg = c_str.to_string_lossy().into_owned();
+				unsafe { ApkFreeResult(&mut result) };
+				msg
+			};
+			return Err(ApkProverError::ProvingFailed(msg));
+		}
+
+		let proof_bytes = unsafe {
+			std::slice::from_raw_parts(result.proof_data, result.proof_len as usize).to_vec()
+		};
+		let public_inputs_bytes = unsafe {
+			std::slice::from_raw_parts(result.public_inputs_data, result.public_inputs_len as usize)
+				.to_vec()
+		};
+
+		unsafe { ApkFreeResult(&mut result) };
+
+		// Parse into typed proof and public inputs.
+		let vk = self.ctx.verifying_key()?;
+		let proof =
+			gnark_plonk_verifier::PlonkProof::try_from((proof_bytes.as_slice(), vk.qcp.len()))?;
+		let public_inputs = parse_public_inputs(&public_inputs_bytes);
+
+		Ok(ApkProof {
+			proof,
+			public_inputs,
+			solidity_proof: proof_bytes,
+			solidity_public_inputs: public_inputs_bytes,
+		})
 	}
+}
 
-	let proof_bytes = unsafe {
-		std::slice::from_raw_parts(result.proof_data, result.proof_len as usize).to_vec()
-	};
-	let public_inputs = unsafe {
-		std::slice::from_raw_parts(result.public_inputs_data, result.public_inputs_len as usize)
-			.to_vec()
-	};
+/// Parse public inputs from gnark's binary witness format (header stripped).
+/// Each public input is a 32-byte big-endian Fr element.
+fn parse_public_inputs(data: &[u8]) -> Vec<gnark_plonk_verifier::Fr> {
+	use ark_ff::BigInteger256;
 
-	unsafe { APKFreeResult(&mut result) };
-
-	Ok(APKProof { proof_bytes, public_inputs })
+	assert_eq!(data.len() % 32, 0);
+	data.chunks(32)
+		.map(|chunk| {
+			let mut limbs = [0u64; 4];
+			for i in 0..4 {
+				let start = i * 8;
+				let mut bytes = [0u8; 8];
+				bytes.copy_from_slice(&chunk[start..start + 8]);
+				limbs[3 - i] = u64::from_be_bytes(bytes);
+			}
+			gnark_plonk_verifier::Fr::from_bigint(BigInteger256::new(limbs))
+				.expect("public input out of range")
+		})
+		.collect()
 }
 
 /// Serialize witness into the FFI wire format:
-///   [1024 x 96-byte G1 points] [4-byte BE count] [n x 2-byte BE indices] [96-byte seed]
+///   [1024 x 96-byte G1 points] [4-byte BE count] [n x 2-byte BE indices]
 ///
 /// Each G1 point is serialized as 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian),
 /// matching gnark-crypto's uncompressed G1 format.
-fn serialize_witness(keys: &[G1Affine], participation: &[u16], seed: &G1Affine) -> Vec<u8> {
+///
+/// The seed point is a protocol constant hardcoded in the circuit and is not
+/// included in the witness.
+fn serialize_witness(keys: &[G1Affine], participation: &[u16]) -> Vec<u8> {
 	let num_indices = participation.len();
-	let total = NUM_VALIDATORS * 96 + 4 + num_indices * 2 + 96;
+	let total = NUM_VALIDATORS * 96 + 4 + num_indices * 2;
 	let mut buf = Vec::with_capacity(total);
 
 	for key in keys {
@@ -231,8 +273,6 @@ fn serialize_witness(keys: &[G1Affine], participation: &[u16], seed: &G1Affine) 
 	for &idx in participation {
 		buf.extend_from_slice(&idx.to_be_bytes());
 	}
-
-	g1_to_gnark_bytes(seed, &mut buf);
 
 	buf
 }

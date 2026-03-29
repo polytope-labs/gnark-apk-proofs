@@ -1,5 +1,17 @@
 // Copyright 2026 Polytope Labs.
 // SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //! PLONK verification algorithm for gnark BLS12-381 proofs.
 //!
@@ -21,7 +33,7 @@ pub fn verify(
 	proof: &PlonkProof,
 	vk: &VerifyingKey,
 	public_inputs: &[Fr],
-) -> Result<bool, VerifierError> {
+) -> Result<(), VerifierError> {
 	// ── Input validation ─────────────────────────────────────────────────
 	if public_inputs.len() != vk.nb_public_variables as usize {
 		return Err(VerifierError::InvalidPublicInputCount {
@@ -380,7 +392,7 @@ fn batch_verify_multi_points(
 	challenges: &Challenges,
 	folded_digests: &G1Affine,
 	folded_evals: &Fr,
-) -> Result<bool, VerifierError> {
+) -> Result<(), VerifierError> {
 	let zeta = challenges.zeta;
 
 	// Derive random scalar for batching the two opening proofs
@@ -408,7 +420,11 @@ fn batch_verify_multi_points(
 	// Pairing check: e(lhs_g1, G2_SRS_0) · e(folded_quotients, G2_SRS_1) == 1
 	let result = Bls12_381::multi_pairing([lhs_g1, folded_quotients], [vk.kzg_g2[0], vk.kzg_g2[1]]);
 
-	Ok(result.is_zero())
+	if result.is_zero() {
+		Ok(())
+	} else {
+		Err(VerifierError::ProofVerificationFailed)
+	}
 }
 
 /// Derive the random scalar for batching the two KZG opening proofs.
@@ -473,19 +489,20 @@ fn derive_batch_random(
 		bytes.copy_from_slice(&hash_arr[start..start + 8]);
 		limbs[3 - i] = u64::from_be_bytes(bytes);
 	}
+	// Reduce the 256-bit hash into Fr. The hash can be up to 2^256-1
+	// which may exceed r_mod multiple times, so use modular arithmetic.
+	use ark_ff::BigInteger;
 	let bigint = ark_ff::BigInteger256::new(limbs);
 	Ok(Fr::from_bigint(bigint).unwrap_or_else(|| {
-		let r_mod =
-			[0xffffffff00000001u64, 0x53bda402fffe5bfe, 0x3339d80809a1d805, 0x73eda753299d7d48];
-		let mut val = limbs;
-		let mut borrow = 0u64;
-		for i in 0..4 {
-			let (diff, b1) = val[i].overflowing_sub(r_mod[i]);
-			let (diff2, b2) = diff.overflowing_sub(borrow);
-			val[i] = diff2;
-			borrow = (b1 as u64) + (b2 as u64);
+		// Value >= r_mod: compute val mod r_mod via repeated subtraction
+		// or more robustly via the Fp reduction path.
+		// Since 2^256 / r_mod < 4, at most 3 subtractions suffice.
+		let r_mod = Fr::MODULUS;
+		let mut val = bigint;
+		while val >= r_mod {
+			val.sub_with_borrow(&r_mod);
 		}
-		Fr::from_bigint(ark_ff::BigInteger256::new(val)).expect("reduced")
+		Fr::from_bigint(val).expect("value should be reduced mod r")
 	}))
 }
 

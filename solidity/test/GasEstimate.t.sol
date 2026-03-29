@@ -16,8 +16,8 @@
 pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
-import "../PlonkVerifier.sol";
-import "../ApkProof.sol";
+import "../contracts/PlonkVerifier.sol";
+import "../contracts/ApkProof.sol";
 
 contract VerifierGasTest is Test {
     /// BLS12-381 base field modulus p.
@@ -35,9 +35,9 @@ contract VerifierGasTest is Test {
         apkProof = new ApkProof(address(plonkVerifier));
     }
 
-    function _loadRawInputs(bytes memory pubData) internal pure returns (uint256[30] memory input) {
-        require(pubData.length == 960, "unexpected public input size");
-        for (uint256 i = 0; i < 30; i++) {
+    function _loadRawInputs(bytes memory pubData) internal pure returns (uint256[18] memory input) {
+        require(pubData.length == 576, "unexpected public input size");
+        for (uint256 i = 0; i < 18; i++) {
             uint256 val;
             assembly {
                 val := mload(add(pubData, add(32, mul(i, 32))))
@@ -47,16 +47,9 @@ contract VerifierGasTest is Test {
     }
 
     /// @dev Reconstruct a 48-byte big-endian Fp element from 6 little-endian 64-bit limbs.
-    function _limbsToFpBytes(
-        uint256[30] memory input,
-        uint256 offset
-    ) internal pure returns (bytes memory) {
-        uint256 lo = input[offset]
-            | (input[offset + 1] << 64)
-            | (input[offset + 2] << 128)
-            | (input[offset + 3] << 192);
-        uint256 hi = input[offset + 4]
-            | (input[offset + 5] << 64);
+    function _limbsToFpBytes(uint256[18] memory input, uint256 offset) internal pure returns (bytes memory) {
+        uint256 lo = input[offset] | (input[offset + 1] << 64) | (input[offset + 2] << 128) | (input[offset + 3] << 192);
+        uint256 hi = input[offset + 4] | (input[offset + 5] << 64);
 
         bytes memory result = new bytes(48);
         assembly {
@@ -67,14 +60,8 @@ contract VerifierGasTest is Test {
     }
 
     /// @dev Build a bytes32[3] G1 point from X and Y limbs in the raw array.
-    function _limbsToG1(
-        uint256[30] memory input,
-        uint256 xOffset
-    ) internal pure returns (bytes32[3] memory g1) {
-        bytes memory packed = abi.encodePacked(
-            _limbsToFpBytes(input, xOffset),
-            _limbsToFpBytes(input, xOffset + 6)
-        );
+    function _limbsToG1(uint256[18] memory input, uint256 xOffset) internal pure returns (bytes32[3] memory g1) {
+        bytes memory packed = abi.encodePacked(_limbsToFpBytes(input, xOffset), _limbsToFpBytes(input, xOffset + 6));
         assembly {
             mstore(g1, mload(add(packed, 32)))
             mstore(add(g1, 32), mload(add(packed, 64)))
@@ -82,30 +69,32 @@ contract VerifierGasTest is Test {
         }
     }
 
-    /// @dev Subtract seed from expectedAPK using G1ADD with negated seed Y.
-    ///      apk = expectedAPK + (-seed), where -seed has Y negated: Y' = p - Y.
-    function _subtractSeed(
-        bytes32[3] memory expectedAPK,
-        bytes32[3] memory seed
-    ) internal view returns (bytes32[3] memory) {
+    /// @dev Subtract seed from expectedApk using G1ADD with negated seed Y.
+    ///      apk = expectedApk + (-seed), where -seed has Y negated: Y' = p - Y.
+    function _subtractSeed(bytes32[3] memory expectedApk) internal view returns (bytes32[3] memory) {
+        // Protocol seed bytes (same as contract constants)
+        bytes memory seed = abi.encodePacked(
+            bytes32(0x054abdb6c5522fe2f71d55922d6f674a4908d39e2b33efcc62520c0621ca0d6a),
+            bytes32(0x6d84ee717b7fb1cb5f46687265be01ce06e518322165fd114cdf6b4ab59eb45e),
+            bytes32(0x9289cc4f6f7948d6b680cef9ecc0e0e0f96bd59a578d58c33c0e10db9c25b5ad)
+        );
+
         // Negate seed: keep X, replace Y with p - Y
         bytes memory negSeed = new bytes(96);
         assembly {
             let dst := add(negSeed, 32)
-            // Copy X (48 bytes) from seed
-            mcopy(dst, seed, 48)
+            let src := add(seed, 32)
+            mcopy(dst, src, 48)
         }
 
-        // Load Y coordinate (48 bytes big-endian at offset 48)
         uint256 yHi;
         uint256 yLo;
         assembly {
-            let yPtr := add(seed, 48) // start of Y in seed array
+            let yPtr := add(add(seed, 32), 48)
             yHi := shr(128, mload(yPtr))
             yLo := mload(add(yPtr, 16))
         }
 
-        // p - y: subtract with borrow
         uint256 negLo;
         uint256 negHi;
         unchecked {
@@ -116,24 +105,23 @@ contract VerifierGasTest is Test {
             }
         }
 
-        // Write negated Y back (48 bytes at offset 48)
         assembly {
             let dst := add(add(negSeed, 32), 48)
             mstore(dst, shl(128, negHi))
             mstore(add(dst, 16), negLo)
         }
 
-        // Convert expectedAPK from bytes32[3] to 96-byte memory
-        bytes memory expectedAPKBytes = new bytes(96);
+        // Convert expectedApk from bytes32[3] to bytes memory
+        bytes memory expectedApkBytes = new bytes(96);
         assembly {
-            mcopy(add(expectedAPKBytes, 32), expectedAPK, 96)
+            mcopy(add(expectedApkBytes, 32), expectedApk, 96)
         }
 
-        // G1ADD(expectedAPK, -seed) using EIP-2537 padded format
+        // G1ADD(expectedApk, -seed)
         bytes memory input = new bytes(256);
         assembly {
             let ptr := add(input, 32)
-            let ePtr := add(expectedAPKBytes, 32)
+            let ePtr := add(expectedApkBytes, 32)
             let nPtr := add(negSeed, 32)
             mcopy(add(ptr, 16), ePtr, 48)
             mcopy(add(ptr, 80), add(ePtr, 48), 48)
@@ -166,24 +154,25 @@ contract VerifierGasTest is Test {
         return result;
     }
 
-    function _buildStructuredInputs(
-        uint256[30] memory raw
-    ) internal view returns (ApkProof.APKPublicInputs memory inputs) {
+    function _buildStructuredInputs(uint256[18] memory raw)
+        internal
+        view
+        returns (ApkProof.ApkPublicInputs memory inputs)
+    {
         for (uint256 i = 0; i < 5; i++) {
             inputs.bitlist[i] = raw[i];
         }
-        inputs.seed = _limbsToG1(raw, 5);
-        inputs.publicKeysCommitment = raw[17];
+        inputs.publicKeysCommitment = raw[5];
 
-        // Recover apk = expectedAPK - seed
-        bytes32[3] memory expectedAPK = _limbsToG1(raw, 18);
-        inputs.apk = _subtractSeed(expectedAPK, inputs.seed);
+        // Recover apk = expectedApk - seed
+        bytes32[3] memory expectedApk = _limbsToG1(raw, 6);
+        inputs.apk = _subtractSeed(expectedApk);
     }
 
     function test_plonk_verify_raw() public {
-        bytes memory proofData = vm.readFileBinary("contracts/test/fixtures/plonk_proof.bin");
-        bytes memory pubData = vm.readFileBinary("contracts/test/fixtures/plonk_public.bin");
-        uint256[30] memory input = _loadRawInputs(pubData);
+        bytes memory proofData = vm.readFileBinary("test/fixtures/plonk_proof.bin");
+        bytes memory pubData = vm.readFileBinary("test/fixtures/plonk_public.bin");
+        uint256[18] memory input = _loadRawInputs(pubData);
 
         uint256 gasBefore = gasleft();
         bool success = plonkVerifier.Verify(proofData, input);
@@ -193,14 +182,14 @@ contract VerifierGasTest is Test {
         emit log_named_uint("PLONK verification gas (raw)", gasUsed);
     }
 
-    function test_plonk_verify_wrapper() public {
-        bytes memory proofData = vm.readFileBinary("contracts/test/fixtures/plonk_proof.bin");
-        bytes memory pubData = vm.readFileBinary("contracts/test/fixtures/plonk_public.bin");
-        uint256[30] memory raw = _loadRawInputs(pubData);
-        ApkProof.APKPublicInputs memory inputs = _buildStructuredInputs(raw);
+    function test_apk_proof_verify() public {
+        bytes memory proofData = vm.readFileBinary("test/fixtures/plonk_proof.bin");
+        bytes memory pubData = vm.readFileBinary("test/fixtures/plonk_public.bin");
+        uint256[18] memory raw = _loadRawInputs(pubData);
+        ApkProof.ApkPublicInputs memory inputs = _buildStructuredInputs(raw);
 
         uint256 gasBefore = gasleft();
-        apkProof.verify(proofData, inputs);
+        apkProof.verify(inputs, proofData);
         uint256 gasUsed = gasBefore - gasleft();
 
         emit log_named_uint("PLONK verification gas (wrapper)", gasUsed);

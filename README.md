@@ -32,7 +32,7 @@ gnark-apk-proofs/
 │   ├── foundry.toml
 │   └── contracts/
 │       ├── PlonkVerifier.sol  # Auto-generated gnark PLONK verifier
-│       ├── APKVerifier.sol    # Human-readable wrapper
+│       ├── ApkProof.sol       # Human-readable wrapper
 │       └── test/              # Gas benchmarks + proof fixtures
 └── README.md
 ```
@@ -76,7 +76,7 @@ The Rust crate provides a builder-pattern API for generating proofs, backed by t
 
 ```toml
 [dependencies]
-gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs" }
+gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", branch = "main" }
 ```
 
 **Requires Go 1.25+** installed — the build script compiles the Go circuit code into a static archive that is linked into your Rust binary. No shared libraries needed at runtime.
@@ -91,11 +91,10 @@ use gnark_apk_prover::{ProofBuilder, G1Affine, ProverContext};
 let ctx = ProverContext::setup(None)?;
 
 // Build and generate a proof
-let proof = ProofBuilder::new()
+let proof = ProofBuilder::new(&ctx)
     .public_keys(validator_keys)   // Vec<G1Affine>, exactly 1024
     .participation(indices)         // Vec<u16>, participating validator indices
-    .seed(seed_point)               // G1Affine
-    .prove(&ctx)?;
+    .prove()?;
 
 // proof.proof_bytes  — ready for Solidity verifier (1184 bytes)
 // proof.public_inputs — 960 bytes (30 x uint256)
@@ -138,13 +137,12 @@ go test -v -run "TestExportPlonkForFoundry" -timeout 30m ./apk/
 
 ## Solidity Verifiers
 
-The `APKVerifier` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It wraps the auto-generated `PlonkVerifier` directly:
+The `ApkProof` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It wraps the auto-generated `PlonkVerifier` directly:
 
 ```solidity
-apkVerifier.verify(proof, APKPublicInputs({
+apkProof.verify(ApkPublicInputs({
     bitlist: [...],
     publicKeysCommitment: ...,
-    seed: seedBytes,                // 96-byte G1 point
     apk: aggregatePublicKey         // 96-byte G1 point (seed added on-chain)
 }));
 ```

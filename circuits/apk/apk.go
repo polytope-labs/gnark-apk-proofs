@@ -17,13 +17,30 @@
 package apk
 
 import (
+	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark/frontend"
+	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/hash/poseidon2"
 	"github.com/consensys/gnark/std/math/emulated"
 )
 
-// APKProofCircuit represents a circuit for aggregating BLS G1 public keys
+// ProtocolSeed returns the fixed seed point for APK aggregation.
+// Computed deterministically via HashToG1 with domain separator "gnark-apk-proofs"
+// and tag "apk-seed". The result is a point in the G1 subgroup.
+//
+// The seed ensures the running accumulator is never the point at infinity
+// during aggregation. See Section 4.1 of "Accountable Light Client Systems
+// for PoS Blockchains" (Ciobotaru et al., https://eprint.iacr.org/2022/1205).
+func ProtocolSeed() bls12381.G1Affine {
+	pt, err := bls12381.HashToG1([]byte("gnark-apk-proofs"), []byte("apk-seed"))
+	if err != nil {
+		panic("failed to compute protocol seed: " + err.Error())
+	}
+	return pt
+}
+
+// ApkProofCircuit represents a circuit for aggregating BLS G1 public keys
 // and proving that a subset's aggregate matches an expected value.
 //
 // Rogue key attacks are prevented by requiring Proof of Possession at registration.
@@ -32,7 +49,7 @@ import (
 //
 // See: "Accountable Light Client Systems for PoS Blockchains" (Ciobotaru et al.)
 // https://eprint.iacr.org/2022/1205
-type APKProofCircuit struct {
+type ApkProofCircuit struct {
 	// ============== Private Witness Variables ==============
 	// Public keys in G1 (input points to be aggregated)
 	PublicKeys [1024]sw_emulated.AffinePoint[emulated.BLS12381Fp]
@@ -41,20 +58,16 @@ type APKProofCircuit struct {
 	// Bitlist that encodes the participating public keys
 	Bitlist [5]frontend.Variable `gnark:",public"`
 
-	// Start point for the aggregation. Must be a point on the curve
-	// but NOT in the G1 subgroup, to ensure incomplete addition formulas
-	// are safe. See Section 4.1 of the paper.
-	Seed sw_emulated.AffinePoint[emulated.BLS12381Fp] `gnark:",public"`
-
 	// Poseidon2 hash commitment to the validator public key set
 	PublicKeysCommitment frontend.Variable `gnark:",public"`
 
-	// Expected aggregate public key of participating validators: apk = Seed + Σ b_i * pk_i
-	ExpectedAPK sw_emulated.AffinePoint[emulated.BLS12381Fp] `gnark:",public"`
+	// Expected aggregate public key of participating validators:
+	//   expectedApk = ProtocolSeed() + Σ b_i * pk_i
+	ExpectedApk sw_emulated.AffinePoint[emulated.BLS12381Fp] `gnark:",public"`
 }
 
 // Define defines the circuit constraints
-func (circuit *APKProofCircuit) Define(api frontend.API) error {
+func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	curve, err := sw_emulated.New[emulated.BLS12381Fp, emulated.BLS12381Fr](api, sw_emulated.GetBLS12381Params())
 	if err != nil {
 		return err
@@ -83,16 +96,17 @@ func (circuit *APKProofCircuit) Define(api frontend.API) error {
 		}
 	}
 
-	// Aggregate participating public keys: apk = Seed + Σ b_i * pk_i
+	// Aggregate participating public keys: apk = ProtocolSeed + Σ b_i * pk_i
 	// Note: on-curve and subgroup checks are performed by validators at
 	// registration time (conditional NP relation / PoP assumption).
-	apk := &circuit.Seed
+	seed := sw_bls12381.NewG1Affine(ProtocolSeed())
+	apk := &seed
 	for i := range 1024 {
 		temp := curve.AddUnified(apk, &circuit.PublicKeys[i])
 		apk = curve.Select(bits[i], temp, apk)
 	}
 
-	curve.AssertIsEqual(apk, &circuit.ExpectedAPK)
+	curve.AssertIsEqual(apk, &circuit.ExpectedApk)
 
 	return nil
 }

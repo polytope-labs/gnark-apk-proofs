@@ -74,17 +74,13 @@ func createBitlist(numBitsToSet int) ([5]frontend.Variable, []int) {
 	return bitlist, selectedIndices
 }
 
-// testSimpleAPKG1 creates a test case with naive public key aggregation (PoP assumed)
-func testSimpleAPKG1(t *testing.T, numParticipants int) (circ, wit frontend.Circuit) {
+// testSimpleApkG1 creates a test case with naive public key aggregation (PoP assumed)
+func testSimpleApkG1(t *testing.T, numParticipants int) (circ, wit frontend.Circuit) {
 	numPoints := 1024
 
 	_, _, G, _ := bls12381.Generators()
 
-	var seed fr.Element
-	seed.SetRandom()
-
-	var init bls12381.G1Affine
-	init.ScalarMultiplication(&G, seed.BigInt(new(big.Int)))
+	init := ProtocolSeed()
 
 	points := make([]bls12381.G1Affine, numPoints)
 	scalars := make([]fr.Element, numPoints)
@@ -107,24 +103,23 @@ func testSimpleAPKG1(t *testing.T, numParticipants int) (circ, wit frontend.Circ
 		participantSet[idx] = true
 	}
 
-	// Compute expected APK: Seed + Σ b_i * pk_i
-	expectedAPK := init
+	// Compute expected APK: ProtocolSeed + Σ b_i * pk_i
+	expectedApk := init
 	for i := range numPoints {
 		if participantSet[i] {
-			expectedAPK.Add(&expectedAPK, &points[i])
+			expectedApk.Add(&expectedApk, &points[i])
 		}
 	}
 
 	// Compute Poseidon2 commitment
 	commitment := NativePublicKeysCommitment(points)
 
-	circuit := APKProofCircuit{}
-	witness := APKProofCircuit{
+	circuit := ApkProofCircuit{}
+	witness := ApkProofCircuit{
 		PublicKeys:          pubKeys,
 		Bitlist:             bitlist,
 		PublicKeysCommitment: commitment,
-		ExpectedAPK:         sw_bls12381.NewG1Affine(expectedAPK),
-		Seed:                sw_bls12381.NewG1Affine(init),
+		ExpectedApk:         sw_bls12381.NewG1Affine(expectedApk),
 	}
 
 	return &circuit, &witness
@@ -132,7 +127,7 @@ func testSimpleAPKG1(t *testing.T, numParticipants int) (circ, wit frontend.Circ
 
 // TestCircuitCompiles verifies the APK circuit compiles correctly.
 func TestCircuitCompiles(t *testing.T) {
-	circuit := &APKProofCircuit{}
+	circuit := &ApkProofCircuit{}
 	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, circuit)
 	if err != nil {
 		t.Fatalf("Circuit compilation failed: %v", err)
@@ -140,8 +135,8 @@ func TestCircuitCompiles(t *testing.T) {
 	t.Logf("Circuit compiled successfully. Constraints: %d", cs.GetNbConstraints())
 }
 
-func TestSimpleBLSG1APKCircuit(t *testing.T) {
-	circuit, witness := testSimpleAPKG1(t, 600)
+func TestSimpleBLSG1ApkCircuit(t *testing.T) {
+	circuit, witness := testSimpleApkG1(t, 600)
 	assert := test.NewAssert(t)
 	assert.CheckCircuit(circuit, test.WithValidAssignment(witness),
 		test.WithCurves(ecc.BLS12_381),
@@ -151,8 +146,8 @@ func TestSimpleBLSG1APKCircuit(t *testing.T) {
 	)
 }
 
-func TestAllBitsSetBLSG1APKCircuit(t *testing.T) {
-	circuit, witness := testSimpleAPKG1(t, 1024)
+func TestAllBitsSetBLSG1ApkCircuit(t *testing.T) {
+	circuit, witness := testSimpleApkG1(t, 1024)
 	assert := test.NewAssert(t)
 	assert.CheckCircuit(circuit, test.WithValidAssignment(witness),
 		test.WithCurves(ecc.BLS12_381),
@@ -162,8 +157,8 @@ func TestAllBitsSetBLSG1APKCircuit(t *testing.T) {
 	)
 }
 
-func TestNoBitsSetBLSG1APKCircuit(t *testing.T) {
-	circuit, witness := testSimpleAPKG1(t, 0)
+func TestNoBitsSetBLSG1ApkCircuit(t *testing.T) {
+	circuit, witness := testSimpleApkG1(t, 0)
 	assert := test.NewAssert(t)
 	assert.CheckCircuit(circuit, test.WithValidAssignment(witness),
 		test.WithCurves(ecc.BLS12_381),

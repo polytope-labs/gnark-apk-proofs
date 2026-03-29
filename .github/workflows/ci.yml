@@ -32,7 +32,7 @@ jobs:
 
       - name: Test (BLS circuit checks)
         working-directory: circuits
-        run: go test -v -timeout 20m -run "TestCircuitCompiles|TestSimpleBLSG1APKCircuit" ./apk/
+        run: go test -v -timeout 20m -run "TestCircuitCompiles|TestSimpleBLSG1ApkCircuit" ./apk/
 
   solidity:
     name: Solidity verifiers

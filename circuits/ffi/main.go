@@ -27,16 +27,12 @@ typedef struct {
 	const char* error;
 } CProveResult;
 
-typedef struct {
-	const uint8_t* data;
-	uint32_t len;
-} CBuffer;
 */
 import "C"
 
 import (
-	"bytes"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -74,9 +70,9 @@ const (
 	defaultSRSPower = 23
 )
 
-//export APKSetup
-func APKSetup(srsDir *C.char) C.uint64_t {
-	circuit := apk.APKProofCircuit{}
+//export ApkSetup
+func ApkSetup(srsDir *C.char) C.uint64_t {
+	circuit := apk.ApkProofCircuit{}
 
 	cs, err := frontend.Compile(ecc.BLS12_381.ScalarField(), scs.NewBuilder, &circuit)
 	if err != nil {
@@ -109,41 +105,30 @@ func APKSetup(srsDir *C.char) C.uint64_t {
 	if err != nil {
 		return 0
 	}
+
+	// Cache VK to disk if not already present.
+	if dir != "" {
+		vkPath := dir + "/plonk_vk.bin"
+		if _, err := os.Stat(vkPath); os.IsNotExist(err) {
+			if f, err := os.Create(vkPath); err == nil {
+				vk.WriteTo(f)
+				f.Close()
+			}
+		}
+	}
+
 	h := nextHandle.Add(1)
 	handleStore.Store(h, &plonkSetup{cs: cs, pk: pk, vk: vk})
 	return C.uint64_t(h)
 }
 
-//export APKFreeHandle
-func APKFreeHandle(handle C.uint64_t) {
+//export ApkFreeHandle
+func ApkFreeHandle(handle C.uint64_t) {
 	handleStore.Delete(uint64(handle))
 }
 
-// APKExportVK serializes the PLONK verifying key from the given handle
-// into gnark's binary format (WriteTo). Returns 0 on success, -1 on error.
-//
-//export APKExportVK
-func APKExportVK(handle C.uint64_t, result *C.CBuffer) C.int32_t {
-	val, ok := handleStore.Load(uint64(handle))
-	if !ok {
-		return -1
-	}
-	setup, ok := val.(*plonkSetup)
-	if !ok {
-		return -1
-	}
-	var buf bytes.Buffer
-	if _, err := setup.vk.WriteTo(&buf); err != nil {
-		return -1
-	}
-	data := buf.Bytes()
-	result.data = (*C.uint8_t)(C.CBytes(data))
-	result.len = C.uint32_t(len(data))
-	return 0
-}
-
-//export APKFreeResult
-func APKFreeResult(result *C.CProveResult) {
+//export ApkFreeResult
+func ApkFreeResult(result *C.CProveResult) {
 	if result.proof_data != nil {
 		C.free(unsafe.Pointer(result.proof_data))
 	}
@@ -158,15 +143,14 @@ func APKFreeResult(result *C.CProveResult) {
 // Witness format (all big-endian):
 //   - 1024 x G1 points: each 96 bytes (X: 48 bytes || Y: 48 bytes)
 //   - participation indices: 4 bytes count (uint32) + count x 2 bytes (uint16 each)
-//   - seed: 96 bytes (G1 point)
 const (
 	g1Size       = 96 // 48-byte X + 48-byte Y
 	numPubKeys   = 1024
 	pubKeysBytes = numPubKeys * g1Size // 98304
 )
 
-//export APKProve
-func APKProve(handle C.uint64_t, witnessData *C.uint8_t, witnessLen C.uint32_t, result *C.CProveResult) C.int32_t {
+//export ApkProve
+func ApkProve(handle C.uint64_t, witnessData *C.uint8_t, witnessLen C.uint32_t, result *C.CProveResult) C.int32_t {
 	val, ok := handleStore.Load(uint64(handle))
 	if !ok {
 		setError(result, "invalid handle")
@@ -216,20 +200,19 @@ func APKProve(handle C.uint64_t, witnessData *C.uint8_t, witnessLen C.uint32_t, 
 	return 0
 }
 
-// parseWitness deserializes the FFI witness buffer into an APKProofCircuit.
+// parseWitness deserializes the FFI witness buffer into an ApkProofCircuit.
 //
 // Wire format:
 //
 //	[0..98304)             1024 G1 points (96 bytes each: X||Y big-endian)
 //	[98304..98308)         uint32 BE: number of participating indices
 //	[98308..98308+n*2)     n x uint16 BE: participating validator indices
-//	[last 96 bytes)        seed G1 point
-func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.APKProofCircuit, error) {
+func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.ApkProofCircuit, error) {
 	buf := C.GoBytes(unsafe.Pointer(data), C.int(length))
 	totalLen := len(buf)
 
-	// Minimum: pubkeys + 4-byte count + seed
-	minLen := pubKeysBytes + 4 + g1Size
+	// Minimum: pubkeys + 4-byte count
+	minLen := pubKeysBytes + 4
 	if totalLen < minLen {
 		return nil, fmt.Errorf("witness too short: %d < %d", totalLen, minLen)
 	}
@@ -255,7 +238,7 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.APKProofCircuit, err
 	numParticipants := int(beUint32(buf[offset : offset+4]))
 	offset += 4
 
-	if offset+numParticipants*2 > totalLen-g1Size {
+	if offset+numParticipants*2 > totalLen {
 		return nil, fmt.Errorf("truncated at participation indices")
 	}
 
@@ -265,39 +248,31 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.APKProofCircuit, err
 		offset += 2
 	}
 
-	// Parse seed (last 96 bytes)
-	seedBytes := buf[totalLen-g1Size:]
-	seed, err := parseG1(seedBytes)
-	if err != nil {
-		return nil, fmt.Errorf("invalid seed: %v", err)
-	}
-
 	// Compute bitlist from indices
 	bitlist := apk.CreateBitlistFromIndices(participantIndices)
 
-	// Compute expected APK: seed + Σ b_i * pk_i
+	// Compute expected APK: ProtocolSeed + Σ b_i * pk_i
 	participantSet := make(map[int]bool, len(participantIndices))
 	for _, idx := range participantIndices {
 		if idx >= 0 && idx < numPubKeys {
 			participantSet[idx] = true
 		}
 	}
-	expectedAPK := seed
+	expectedApk := apk.ProtocolSeed()
 	for i := range numPubKeys {
 		if participantSet[i] {
-			expectedAPK.Add(&expectedAPK, &points[i])
+			expectedApk.Add(&expectedApk, &points[i])
 		}
 	}
 
 	// Compute Poseidon2 commitment
 	commitment := apk.NativePublicKeysCommitment(points)
 
-	return &apk.APKProofCircuit{
+	return &apk.ApkProofCircuit{
 		PublicKeys:          pubKeys,
 		Bitlist:             bitlist,
-		Seed:                sw_bls12381.NewG1Affine(seed),
 		PublicKeysCommitment: commitment,
-		ExpectedAPK:         sw_bls12381.NewG1Affine(expectedAPK),
+		ExpectedApk:         sw_bls12381.NewG1Affine(expectedApk),
 	}, nil
 }
 
@@ -329,13 +304,6 @@ func copyToResult(result *C.CProveResult, proofBytes, pubBytes []byte) {
 	result.public_inputs_len = C.uint32_t(len(pubBytes))
 	result.public_inputs_data = (*C.uint8_t)(C.CBytes(pubBytes))
 	result.error = nil
-}
-
-//export APKFreeBuffer
-func APKFreeBuffer(buf *C.CBuffer) {
-	if buf.data != nil {
-		C.free(unsafe.Pointer(buf.data))
-	}
 }
 
 func main() {}

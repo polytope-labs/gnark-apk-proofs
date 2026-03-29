@@ -31,16 +31,24 @@ contract ApkProof {
     /// EIP-2537 BLS12-381 G1ADD precompile address.
     uint256 constant PRECOMPILE_BLS12_G1ADD = 0x0b;
 
+    /// Protocol-fixed seed point for APK aggregation.
+    /// Computed as HashToG1(dst="gnark-apk-proofs", msg="apk-seed").
+    /// The circuit hardcodes this same constant; the contract adds it to the
+    /// caller-supplied APK before passing to the PLONK verifier.
+    bytes32 constant SEED_0 = 0x054abdb6c5522fe2f71d55922d6f674a4908d39e2b33efcc62520c0621ca0d6a;
+    bytes32 constant SEED_1 = 0x6d84ee717b7fb1cb5f46687265be01ce06e518322165fd114cdf6b4ab59eb45e;
+    bytes32 constant SEED_2 = 0x9289cc4f6f7948d6b680cef9ecc0e0e0f96bd59a578d58c33c0e10db9c25b5ad;
+
     /// @notice Public inputs for the APK proof circuit.
-    struct APKPublicInputs {
+    struct ApkPublicInputs {
+        /// Poseidon2 hash commitment over all 1024 validator public keys.
+        /// Computed as: Poseidon2(pk_0.X.limbs || pk_0.Y.limbs || pk_1.X.limbs || ... || pk_1023.Y.limbs)
+        /// where each Fp coordinate is decomposed into 6 x 64-bit little-endian limbs
+        /// (12 limbs per G1 point, 12288 field elements total).
+        uint256 publicKeysCommitment;
         /// Bitlist encoding participating validators (5 field elements).
         /// bitlist[0..3] encode 250 bits each, bitlist[4] encodes 24 bits.
         uint256[5] bitlist;
-        /// Poseidon2 hash commitment over all 1024 validator public keys.
-        uint256 publicKeysCommitment;
-        /// Seed point for aggregation (must be on curve but NOT in G1 subgroup).
-        /// 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
-        bytes32[3] seed;
         /// Aggregate public key of participating validators: apk = sum(b_i * pk_i).
         /// 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
         /// Note: The circuit expects seed + apk; the contract adds the seed automatically.
@@ -55,149 +63,103 @@ contract ApkProof {
     /// @param proof The serialized proof bytes.
     /// @param inputs The structured public inputs.
     function verify(
-        bytes calldata proof,
-        APKPublicInputs calldata inputs
+        ApkPublicInputs calldata inputs,
+        bytes calldata proof
     ) external view {
-        uint256[30] memory encoded = _encodePublicInputs(inputs);
+        uint256[18] memory encoded = _encodePublicInputs(inputs);
         if (!verifier.Verify(proof, encoded)) {
             revert ProofVerificationFailed();
         }
     }
 
-    /// @dev Encode structured public inputs into the flat uint256[30] format
-    ///      expected by the gnark verifiers.
+    /// @dev Encode structured public inputs into the flat uint256[18] format
+    ///      expected by the gnark verifier.
     ///
     ///      Layout (matching circuit witness serialization):
     ///        [0..4]   bitlist (5 elements)
-    ///        [5..10]  seed.X limbs (6 x 64-bit, little-endian)
-    ///        [11..16] seed.Y limbs (6 x 64-bit, little-endian)
-    ///        [17]     publicKeysCommitment
-    ///        [18..23] expectedAPK.X limbs (6 x 64-bit, little-endian)
-    ///        [24..29] expectedAPK.Y limbs (6 x 64-bit, little-endian)
+    ///        [5]      publicKeysCommitment
+    ///        [6..11]  expectedApk.X limbs (6 x 64-bit, little-endian)
+    ///        [12..17] expectedApk.Y limbs (6 x 64-bit, little-endian)
+    ///
+    ///      All work is done in a single assembly block using scratch memory
+    ///      to avoid heap allocations and function call overhead.
     function _encodePublicInputs(
-        APKPublicInputs calldata inputs
-    ) internal view returns (uint256[30] memory out) {
-        // Bitlist
-        for (uint256 i = 0; i < 5; i++) {
-            out[i] = inputs.bitlist[i];
-        }
+        ApkPublicInputs calldata inputs
+    ) internal view returns (uint256[18] memory out) {
+        bytes32 s0 = SEED_0;
+        bytes32 s1 = SEED_1;
+        bytes32 s2 = SEED_2;
 
-        // Seed G1 point (96 bytes -> 12 limbs)
-        _g1BytesToLimbs(inputs.seed, out, 5);
-
-        // Public keys commitment
-        out[17] = inputs.publicKeysCommitment;
-
-        // Compute expectedAPK = seed + apk via G1ADD precompile
-        bytes memory expectedAPK = _g1Add(inputs.seed, inputs.apk);
-        _g1PaddedToLimbs(expectedAPK, out, 18);
-    }
-
-    /// @dev Add two BLS12-381 G1 points using the EIP-2537 G1ADD precompile.
-    /// @param a First G1 point (bytes32[3] = 96 bytes uncompressed).
-    /// @param b Second G1 point (bytes32[3] = 96 bytes uncompressed).
-    /// @return result The padded result (128 bytes: 64-byte X || 64-byte Y).
-    function _g1Add(
-        bytes32[3] calldata a,
-        bytes32[3] calldata b
-    ) internal view returns (bytes memory result) {
-        // G1ADD input: two padded G1 points (128 bytes each) = 256 bytes
-        // Padded format: 16 zero bytes || X (48 bytes) || 16 zero bytes || Y (48 bytes)
-        bytes memory input = new bytes(256);
         assembly {
-            let ptr := add(input, 32)
-            // Point a: pad X (48 bytes from calldata offset a)
-            calldatacopy(add(ptr, 16), a, 48)
-            // Point a: pad Y (48 bytes from calldata offset a+48)
-            calldatacopy(add(ptr, 80), add(a, 48), 48)
-            // Point b: pad X
-            calldatacopy(add(ptr, 144), b, 48)
-            // Point b: pad Y
-            calldatacopy(add(ptr, 208), add(b, 48), 48)
+            let mask := 0xFFFFFFFFFFFFFFFF
+
+            // --- Copy bitlist and commitment into out[0..5] ---
+            // Struct calldata layout: commitment(32) || bitlist(5*32) || apk(3*32)
+            // Verifier expects: out[0..4]=bitlist, out[5]=commitment
+            calldatacopy(out, add(inputs, 32), 160)        // bitlist (5*32) -> out[0..4]
+            calldatacopy(add(out, 160), inputs, 32)        // commitment -> out[5]
+
+            // --- Build G1ADD input in scratch memory at `out + 576` ---
+            // out occupies 18*32 = 576 bytes; we use the space after it as scratch.
+            let scratch := add(out, 576)
+
+            // Zero the 256-byte G1ADD input region
+            mstore(scratch, 0)
+            mstore(add(scratch, 32), 0)
+            mstore(add(scratch, 64), 0)
+            mstore(add(scratch, 96), 0)
+            mstore(add(scratch, 128), 0)
+            mstore(add(scratch, 160), 0)
+            mstore(add(scratch, 192), 0)
+            mstore(add(scratch, 224), 0)
+
+            // Seed point (padded EIP-2537 format):
+            //   [16..48)  = s0          (seed X high 32 bytes)
+            //   [48..64)  = s1[0:16]    (seed X low 16 bytes)
+            //   [80..96)  = s1[16:32]   (seed Y high 16 bytes)
+            //   [96..128) = s2          (seed Y low 32 bytes)
+            mstore(add(scratch, 16), s0)
+            mstore(add(scratch, 48), s1)
+            mstore(add(scratch, 64), 0)            // zero-pad between X and Y
+            mstore(add(scratch, 80), shl(128, s1)) // s1[16:32] left-aligned
+            mstore(add(scratch, 96), s2)
+
+            // APK point from calldata (padded):
+            //   apk offset in inputs = 192 (after bitlist + commitment)
+            let apkOff := add(inputs, 192)
+            calldatacopy(add(scratch, 144), apkOff, 48)       // APK X
+            calldatacopy(add(scratch, 208), add(apkOff, 48), 48) // APK Y
+
+            // --- Call G1ADD precompile, output to scratch+256 (128 bytes) ---
+            let res := add(scratch, 256)
+            let ok := staticcall(gas(), PRECOMPILE_BLS12_G1ADD, scratch, 256, res, 128)
+            if iszero(ok) {
+                mstore(0, 0x55d4cbf9) // G1AddFailed()
+                revert(28, 4)
+            }
+
+            // --- Decompose padded G1 result into 12 x 64-bit limbs ---
+            // Result layout: [16 zero | X 48 bytes | 16 zero | Y 48 bytes]
+
+            // X coordinate: hi at res+16, lo at res+32
+            let xHi := mload(add(res, 16))
+            let xLo := mload(add(res, 32))
+            mstore(add(out, 192), and(xLo, mask))          // out[6]
+            mstore(add(out, 224), and(shr(64, xLo), mask))  // out[7]
+            mstore(add(out, 256), and(shr(128, xLo), mask)) // out[8]
+            mstore(add(out, 288), and(shr(192, xLo), mask)) // out[9]
+            mstore(add(out, 320), and(shr(128, xHi), mask)) // out[10]
+            mstore(add(out, 352), shr(192, xHi))            // out[11]
+
+            // Y coordinate: hi at res+80, lo at res+96
+            let yHi := mload(add(res, 80))
+            let yLo := mload(add(res, 96))
+            mstore(add(out, 384), and(yLo, mask))          // out[12]
+            mstore(add(out, 416), and(shr(64, yLo), mask))  // out[13]
+            mstore(add(out, 448), and(shr(128, yLo), mask)) // out[14]
+            mstore(add(out, 480), and(shr(192, yLo), mask)) // out[15]
+            mstore(add(out, 512), and(shr(128, yHi), mask)) // out[16]
+            mstore(add(out, 544), shr(192, yHi))            // out[17]
         }
-
-        result = new bytes(128);
-        bool success;
-        assembly {
-            success := staticcall(
-                gas(),
-                PRECOMPILE_BLS12_G1ADD,
-                add(input, 32),
-                256,
-                add(result, 32),
-                128
-            )
-        }
-        if (!success) revert G1AddFailed();
-    }
-
-    /// @dev Parse a 128-byte EIP-2537 padded G1 point into 12 x 64-bit limbs.
-    ///      Padded format: [16 zero | X 48 bytes] [16 zero | Y 48 bytes]
-    function _g1PaddedToLimbs(
-        bytes memory point,
-        uint256[30] memory out,
-        uint256 offset
-    ) internal pure {
-        // X starts at byte 16, Y starts at byte 80
-        _fpMemBytesToLimbs(point, 16, out, offset);
-        _fpMemBytesToLimbs(point, 80, out, offset + 6);
-    }
-
-    /// @dev Parse a 96-byte uncompressed G1 point (bytes32[3] calldata) into 12 x 64-bit limbs.
-    ///      The three words are contiguous in calldata: bytes[0:48] = X, bytes[48:96] = Y.
-    function _g1BytesToLimbs(
-        bytes32[3] calldata point,
-        uint256[30] memory out,
-        uint256 offset
-    ) internal pure {
-        uint256 hi;
-        uint256 lo;
-
-        // X coordinate (bytes[0:48])
-        assembly {
-            hi := calldataload(point)
-            lo := calldataload(add(point, 16))
-        }
-        out[offset]     = lo & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 1] = (lo >> 64) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 2] = (lo >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 3] = (lo >> 192) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 4] = (hi >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 5] = (hi >> 192) & 0xFFFFFFFFFFFFFFFF;
-
-        // Y coordinate (bytes[48:96])
-        assembly {
-            hi := calldataload(add(point, 48))
-            lo := calldataload(add(point, 64))
-        }
-        out[offset + 6]  = lo & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 7]  = (lo >> 64) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 8]  = (lo >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 9]  = (lo >> 192) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 10] = (hi >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 11] = (hi >> 192) & 0xFFFFFFFFFFFFFFFF;
-    }
-
-    /// @dev Convert a 48-byte big-endian Fp element (from memory at given start offset)
-    ///      into 6 x 64-bit limbs in little-endian order.
-    function _fpMemBytesToLimbs(
-        bytes memory data,
-        uint256 start,
-        uint256[30] memory out,
-        uint256 offset
-    ) internal pure {
-        uint256 hi;
-        uint256 lo;
-        assembly {
-            let ptr := add(add(data, 32), start)
-            hi := mload(ptr)
-            lo := mload(add(ptr, 16))
-        }
-        out[offset]     = lo & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 1] = (lo >> 64) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 2] = (lo >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 3] = (lo >> 192) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 4] = (hi >> 128) & 0xFFFFFFFFFFFFFFFF;
-        out[offset + 5] = (hi >> 192) & 0xFFFFFFFFFFFFFFFF;
     }
 }
