@@ -17,23 +17,26 @@ pragma solidity ^0.8.28;
 
 import {PlonkVerifier} from "./PlonkVerifier.sol";
 
-/// @title APK Proof & BLS Aggregate Signature Verifier
-/// @notice Verifies both APK aggregation proofs (via PLONK) and aggregate BLS
-///         signatures using the scheme from "Efficient Aggregatable BLS
-///         Signatures with Chaum-Pedersen Proofs" (https://eprint.iacr.org/2022/1611).
-///
-/// @dev BLS aggregate signature verification equation:
-///        e(asig + t·apk₁, g₂) = e(H(m) + t·g₁, apk₂)
-///      Checked as: e(asig + t·apk₁, -g₂) · e(H(m) + t·g₁, apk₂) = 1
-///      where t = hash_to_field(H(m) ‖ sig ‖ apk₁ ‖ apk₂) via expand_message_xmd.
-///
-///      BLS12-381 G1 points are passed as `bytes32[3]` (96 bytes total):
-///      X (48 bytes big-endian) || Y (48 bytes big-endian), matching the
-///      standard gnark-crypto / EIP-2537 uncompressed G1 format.
-///
-///      G2 points are 192 bytes uncompressed (X.c0‖X.c1‖Y.c0‖Y.c1, 48 bytes each).
-///
-///      Requires Prague EVM (Pectra hardfork) for EIP-2537 BLS12-381 precompiles.
+/**
+ * @title APK Proof & BLS Aggregate Signature Verifier
+ * @notice Verifies both APK aggregation proofs (via PLONK) and aggregate BLS
+ *         signatures using the scheme from "Efficient Aggregatable BLS
+ *         Signatures with Chaum-Pedersen Proofs" (https://eprint.iacr.org/2022/1611).
+ *
+ * @dev BLS aggregate signature verification equation:
+ *        e(asig + t·apk₁, g₂) = e(H(m) + t·g₁, apk₂)
+ *      Checked as: e(asig + t·apk₁, -g₂) · e(H(m) + t·g₁, apk₂) = 1
+ *      where t = hash_to_field(H(m) ‖ sig ‖ apk₁ ‖ apk₂) via expand_message_xmd.
+ *
+ *      BLS12-381 G1 points are passed as `bytes32[3]` (96 bytes total):
+ *      X (48 bytes big-endian) || Y (48 bytes big-endian), matching the
+ *      standard gnark-crypto / EIP-2537 uncompressed G1 format.
+ *
+ *      G2 points are passed as `bytes32[6]` (192 bytes uncompressed):
+ *      X.c0‖X.c1‖Y.c0‖Y.c1, 48 bytes each.
+ *
+ *      Requires Prague EVM (Pectra hardfork) for EIP-2537 BLS12-381 precompiles.
+ */
 contract ApkProof {
     PlonkVerifier public immutable _plonk;
 
@@ -49,12 +52,12 @@ contract ApkProof {
     uint256 constant PRECOMPILE_BLS12_PAIRING = 0x0f;
     uint256 constant PRECOMPILE_BLS12_MAP_FP_TO_G1 = 0x10;
 
-    /// APK proof constants
-    ///
-    /// Protocol-fixed seed point for APK aggregation.
-    /// Computed as HashToG1(dst="gnark-apk-proofs", msg="apk-seed").
-    /// The circuit hardcodes this same constant; the contract adds it to the
-    /// caller-supplied APK before passing to the PLONK verifier.
+    /**
+     * Protocol-fixed seed point for APK aggregation.
+     * Computed as HashToG1(dst="gnark-apk-proofs", msg="apk-seed").
+     * The circuit hardcodes this same constant; the contract adds it to the
+     * caller-supplied APK before passing to the PLONK verifier.
+     */
     bytes32 constant SEED_0 = 0x054abdb6c5522fe2f71d55922d6f674a4908d39e2b33efcc62520c0621ca0d6a;
     bytes32 constant SEED_1 = 0x6d84ee717b7fb1cb5f46687265be01ce06e518322165fd114cdf6b4ab59eb45e;
     bytes32 constant SEED_2 = 0x9289cc4f6f7948d6b680cef9ecc0e0e0f96bd59a578d58c33c0e10db9c25b5ad;
@@ -70,12 +73,13 @@ contract ApkProof {
     uint256 private constant G1_GEN_Y_HI = 0x0000000000000000000000000000000008b3f481e3aaa0f1a09e30ed741d8ae4;
     uint256 private constant G1_GEN_Y_LO = 0xfcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1;
 
-    /// Negated BLS12-381 G2 generator (-g₂) in EIP-2537 padded format.
-    /// X coordinates are unchanged; Y coordinates are negated (p − Y.c0, p − Y.c1).
-    /// Using -g₂ lets us write the pairing check as:
-    ///   e(asig + t·apk₁, -g₂) · e(H(m) + t·g₁, apk₂) = 1
-    /// avoiding a runtime G1 negation.
-    /// X values from the gnark PlonkVerifier's G2_SRS_0 constants.
+    /**
+     * Negated BLS12-381 G2 generator (-g₂) in EIP-2537 padded format.
+     * X coordinates are unchanged; Y coordinates are negated (p − Y.c0, p − Y.c1).
+     * Using -g₂ lets us write the pairing check as:
+     *   e(asig + t·apk₁, -g₂) · e(H(m) + t·g₁, apk₂) = 1
+     * avoiding a runtime G1 negation.
+     */
     uint256 private constant NEG_G2_GEN_X_0_HI = 3045985886519456750490515843806728273;
     uint256 private constant NEG_G2_GEN_X_0_LO =
         89961632905173714226157479458612185649920463576279427516307505038263245192632;
@@ -89,25 +93,39 @@ contract ApkProof {
     uint256 private constant NEG_G2_GEN_Y_1_LO =
         69304817850384178235384652711014277219752988873539414788182467642510429663469;
 
+    /**
+     * w3f/bls cipher suite prefix for message signing (assuming PoP):
+     * "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_" (43 bytes, split 32+11)
+     */
+    uint256 private constant CIPHER_SUITE_FIRST_32 =
+        0x424c535f5349475f424c53313233383147315f584d443a5348412d3235365f53;
+    uint256 private constant CIPHER_SUITE_LAST_11 = 0x5357555f524f5f504f505f;
+
     /// BLS12-381 base field modulus p, split for mstore (32 + 16 bytes).
     /// p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
     uint256 private constant BLS_P_FIRST_32 =
         0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f624;
     uint256 private constant BLS_P_LAST_16 = 0x1eabfffeb153ffffb9feffffffffaaab;
 
-    /// @notice Public inputs for the APK proof circuit.
+    /** @notice Public inputs for the APK proof circuit. */
     struct PublicInputs {
-        /// Poseidon2 hash commitment over all 1024 validator public keys.
-        /// Computed as: Poseidon2(pk_0.X.limbs || pk_0.Y.limbs || pk_1.X.limbs || ... || pk_1023.Y.limbs)
-        /// where each Fp coordinate is decomposed into 6 x 64-bit little-endian limbs
-        /// (12 limbs per G1 point, 12288 field elements total).
+        /**
+         * Poseidon2 hash commitment over all 1024 validator public keys.
+         * Computed as: Poseidon2(pk_0.X.limbs || pk_0.Y.limbs || ... || pk_1023.Y.limbs)
+         * where each Fp coordinate is decomposed into 6 x 64-bit little-endian limbs
+         * (12 limbs per G1 point, 12288 field elements total).
+         */
         uint256 publicKeysCommitment;
-        /// Bitlist encoding participating validators (5 field elements).
-        /// bitlist[0..3] encode 250 bits each, bitlist[4] encodes 24 bits.
+        /**
+         * Bitlist encoding participating validators (5 field elements).
+         * bitlist[0..3] encode 250 bits each, bitlist[4] encodes 24 bits.
+         */
         uint256[5] bitlist;
-        /// Aggregate public key of participating validators: apk = sum(b_i * pk_i).
-        /// 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
-        /// Note: The circuit expects seed + apk; the contract adds the seed automatically.
+        /**
+         * Aggregate public key of participating validators: apk = sum(b_i * pk_i).
+         * 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
+         * Note: The circuit expects seed + apk; the contract adds the seed automatically.
+         */
         bytes32[3] apk;
     }
 
@@ -115,12 +133,14 @@ contract ApkProof {
         _plonk = PlonkVerifier(_verifier);
     }
 
-    /// @notice Verify both APK aggregation proof and aggregate BLS signature in one call.
-    /// @param apkInputs   Structured public inputs for the APK proof.
-    /// @param apkProof    The serialized PLONK proof bytes.
-    /// @param message H(m) ∈ G1, bytes32[3] (96 bytes).
-    /// @param signature   Aggregate signature ∈ G1, bytes32[3] (96 bytes).
-    /// @param apk2        Aggregate public key ∈ G2, bytes32[6] (192 bytes).
+    /**
+     * @notice Verify both APK aggregation proof and aggregate BLS signature in one call.
+     * @param apkInputs   Structured public inputs for the APK proof.
+     * @param apkProof    The serialized PLONK proof bytes.
+     * @param message     H(m) ∈ G1, bytes32[3] (96 bytes).
+     * @param signature   Aggregate signature ∈ G1, bytes32[3] (96 bytes).
+     * @param apk2        Aggregate public key ∈ G2, bytes32[6] (192 bytes).
+     */
     function verify(
         PublicInputs calldata apkInputs,
         bytes calldata apkProof,
@@ -136,12 +156,14 @@ contract ApkProof {
         if (!_verifyBls(apkInputs, message, signature, apk2)) revert SignatureVerificationFailed();
     }
 
-    /// @notice Hash an arbitrary message to a BLS12-381 G1 point.
-    ///         Implements hash_to_curve (RFC 9380) with expand_message_xmd (SHA-256).
-    ///         Uses DST = 0x01 (w3f/bls convention). Caller must prepend the cipher
-    ///         suite string to the message (e.g. "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_").
-    /// @param message The message to hash (with cipher suite prefix).
-    /// @return result Uncompressed G1 point as bytes32[3] (X ‖ Y, 96 bytes).
+    /**
+     * @notice Hash a message to a BLS12-381 G1 point (w3f/bls compatible).
+     *         Implements hash_to_curve (RFC 9380) with expand_message_xmd (SHA-256),
+     *         DST = 0x01, and the cipher suite prefix
+     *         "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_" prepended internally.
+     * @param message The raw message to hash.
+     * @return result Uncompressed G1 point as bytes32[3] (X ‖ Y, 96 bytes).
+     */
     function hashToG1(bytes calldata message) public view returns (bytes32[3] memory result) {
         assembly {
             let ptr := mload(0x40)
@@ -154,17 +176,19 @@ contract ApkProof {
             //   uniform_bytes = b1 ‖ b2 ‖ b3 ‖ b4
             // ═══════════════════════════════════════════════════════════
 
-            // msg_prime = Z_pad(64) ‖ msg ‖ I2OSP(128,2) ‖ I2OSP(0,1) ‖ DST_prime
+            // msg_prime = Z_pad(64) ‖ cipher_suite(43) ‖ msg ‖ I2OSP(128,2) ‖ I2OSP(0,1) ‖ DST_prime
             mstore(ptr, 0)                                           // Z_pad[0..31]
             mstore(add(ptr, 0x20), 0)                                // Z_pad[32..63]
-            calldatacopy(add(ptr, 0x40), message.offset, msgLen)     // message
-            let pos := add(add(ptr, 0x40), msgLen)
+            mstore(add(ptr, 0x40), CIPHER_SUITE_FIRST_32)            // cipher[0..31]
+            mstore(add(ptr, 0x60), shl(168, CIPHER_SUITE_LAST_11))   // cipher[32..42]
+            calldatacopy(add(ptr, 0x6B), message.offset, msgLen)     // message
+            let pos := add(add(ptr, 0x6B), msgLen)
             mstore8(pos, 0x00)                                       // I2OSP(128,2) high
             mstore8(add(pos, 1), 0x80)                               // I2OSP(128,2) low
             mstore8(add(pos, 2), 0x00)                               // I2OSP(0,1)
             mstore8(add(pos, 3), 0x01)                               // DST[0]
             mstore8(add(pos, 4), 0x01)                               // I2OSP(1,1)
-            let msgPrimeLen := add(0x45, msgLen)                     // 64+msg+3+2
+            let msgPrimeLen := add(0x70, msgLen)                     // 64+43+msg+3+2 = 112+msg
 
             // b0 = SHA256(msg_prime) — output just past msg_prime
             let b0Out := add(ptr, msgPrimeLen)
@@ -256,16 +280,18 @@ contract ApkProof {
         }
     }
 
-    /// @dev Derive challenge t and verify the BLS pairing check — all in assembly.
-    ///      Reads apk1 directly from the struct's calldata slot, no memory copies.
-    ///
-    ///      Phase 1 — expand_message_xmd (SHA-256, empty DST, 48-byte output):
-    ///        msg_prime = Z_pad(64) ‖ message(96) ‖ sig(96) ‖ apk1(96) ‖ apk2(192) ‖ 0x00300000
-    ///        b0 = SHA256(msg_prime), b1 = SHA256(b0‖0x0100), b2 = SHA256((b0⊕b1)‖0x0200)
-    ///        t  = (b1·2¹²⁸ + b2>>128) mod r
-    ///
-    ///      Phase 2 — pairing check:
-    ///        e(sig + t·apk₁, -g₂) · e(msg + t·g₁, apk₂) = 1
+    /**
+     * @dev Derive challenge t and verify the BLS pairing check — all in assembly.
+     *      Reads apk1 directly from the struct's calldata slot, no memory copies.
+     *
+     *      Phase 1 — expand_message_xmd (SHA-256, empty DST, 48-byte output):
+     *        msg_prime = Z_pad(64) ‖ message(96) ‖ sig(96) ‖ apk1(96) ‖ apk2(192) ‖ 0x00300000
+     *        b0 = SHA256(msg_prime), b1 = SHA256(b0‖0x0100), b2 = SHA256((b0⊕b1)‖0x0200)
+     *        t  = (b1·2¹²⁸ + b2>>128) mod r
+     *
+     *      Phase 2 — pairing check:
+     *        e(sig + t·apk₁, -g₂) · e(msg + t·g₁, apk₂) = 1
+     */
     function _verifyBls(
         PublicInputs calldata apkInputs,
         bytes32[3] calldata message,
@@ -401,8 +427,13 @@ contract ApkProof {
         }
     }
 
-    /// @dev Encode structured public inputs into the flat uint256[18] format
-    ///      expected by the gnark verifier.
+    /**
+     * @dev Encode structured public inputs into the flat uint256[18] format
+     *      expected by the gnark verifier.
+     *
+     *      Struct calldata layout: commitment(32) || bitlist(5*32) || apk(3*32)
+     *      Verifier expects:       out[0..4]=bitlist, out[5]=commitment, out[6..17]=apk limbs
+     */
     function _encodePublicInputs(PublicInputs calldata inputs) internal view returns (uint256[18] memory out) {
         bytes32 s0 = SEED_0;
         bytes32 s1 = SEED_1;
@@ -412,10 +443,17 @@ contract ApkProof {
             let mask := 0xFFFFFFFFFFFFFFFF
 
             // --- Copy bitlist and commitment into out[0..5] ---
-            calldatacopy(out, add(inputs, 32), 160) // bitlist (5*32) -> out[0..4]
-            calldatacopy(add(out, 160), inputs, 32) // commitment -> out[5]
+            calldatacopy(out, add(inputs, 32), 160)     // bitlist (5*32) → out[0..4]
+            calldatacopy(add(out, 160), inputs, 32)     // commitment     → out[5]
 
-            // --- Build G1ADD input in scratch memory at `out + 576` ---
+            /*
+             * Build G1ADD input in scratch memory at out + 576.
+             * out occupies 18*32 = 576 bytes; we use the space after it as scratch.
+             *
+             * G1ADD input layout (256 bytes, two padded G1 points):
+             *   [0..127]   = seed point (padded EIP-2537 format)
+             *   [128..255] = apk point  (padded EIP-2537 format)
+             */
             let scratch := add(out, 576)
 
             // Zero the 256-byte G1ADD input region
@@ -428,19 +466,28 @@ contract ApkProof {
             mstore(add(scratch, 192), 0)
             mstore(add(scratch, 224), 0)
 
-            // Seed point (padded EIP-2537 format)
+            /*
+             * Seed point in padded EIP-2537 format (128 bytes):
+             *   [0..15]   = zero padding
+             *   [16..47]  = s0       (seed X high 32 bytes)
+             *   [48..63]  = s1[0:16] (seed X low 16 bytes)
+             *   [64..79]  = zero padding between X and Y
+             *   [80..95]  = s1[16:32](seed Y high 16 bytes)
+             *   [96..127] = s2       (seed Y low 32 bytes)
+             */
             mstore(add(scratch, 16), s0)
             mstore(add(scratch, 48), s1)
-            mstore(add(scratch, 64), 0)
+            mstore(add(scratch, 64), 0)                 // zero-pad between X and Y
             mstore(add(scratch, 80), shl(128, s1))
             mstore(add(scratch, 96), s2)
 
             // APK point from calldata (padded)
+            // apk offset in inputs = 192 (after commitment(32) + bitlist(160))
             let apkOff := add(inputs, 192)
-            calldatacopy(add(scratch, 144), apkOff, 48)
-            calldatacopy(add(scratch, 208), add(apkOff, 48), 48)
+            calldatacopy(add(scratch, 144), apkOff, 48)             // APK X
+            calldatacopy(add(scratch, 208), add(apkOff, 48), 48)    // APK Y
 
-            // --- Call G1ADD precompile ---
+            // --- Call G1ADD precompile, output to scratch+256 (128 bytes) ---
             let res := add(scratch, 256)
             let ok := staticcall(gas(), PRECOMPILE_BLS12_G1ADD, scratch, 256, res, 128)
             if iszero(ok) {
@@ -448,24 +495,29 @@ contract ApkProof {
                 revert(28, 4)
             }
 
-            // --- Decompose padded G1 result into 12 x 64-bit limbs ---
+            /*
+             * Decompose padded G1 result into 12 x 64-bit limbs → out[6..17].
+             * Result layout: [16 zero | X 48 bytes | 16 zero | Y 48 bytes]
+             * X coordinate: hi at res+16, lo at res+32
+             * Y coordinate: hi at res+80, lo at res+96
+             */
             let xHi := mload(add(res, 16))
             let xLo := mload(add(res, 32))
-            mstore(add(out, 192), and(xLo, mask))
-            mstore(add(out, 224), and(shr(64, xLo), mask))
-            mstore(add(out, 256), and(shr(128, xLo), mask))
-            mstore(add(out, 288), and(shr(192, xLo), mask))
-            mstore(add(out, 320), and(shr(128, xHi), mask))
-            mstore(add(out, 352), shr(192, xHi))
+            mstore(add(out, 192), and(xLo, mask))               // out[6]
+            mstore(add(out, 224), and(shr(64, xLo), mask))      // out[7]
+            mstore(add(out, 256), and(shr(128, xLo), mask))     // out[8]
+            mstore(add(out, 288), and(shr(192, xLo), mask))     // out[9]
+            mstore(add(out, 320), and(shr(128, xHi), mask))     // out[10]
+            mstore(add(out, 352), shr(192, xHi))                // out[11]
 
             let yHi := mload(add(res, 80))
             let yLo := mload(add(res, 96))
-            mstore(add(out, 384), and(yLo, mask))
-            mstore(add(out, 416), and(shr(64, yLo), mask))
-            mstore(add(out, 448), and(shr(128, yLo), mask))
-            mstore(add(out, 480), and(shr(192, yLo), mask))
-            mstore(add(out, 512), and(shr(128, yHi), mask))
-            mstore(add(out, 544), shr(192, yHi))
+            mstore(add(out, 384), and(yLo, mask))               // out[12]
+            mstore(add(out, 416), and(shr(64, yLo), mask))      // out[13]
+            mstore(add(out, 448), and(shr(128, yLo), mask))     // out[14]
+            mstore(add(out, 480), and(shr(192, yLo), mask))     // out[15]
+            mstore(add(out, 512), and(shr(128, yHi), mask))     // out[16]
+            mstore(add(out, 544), shr(192, yHi))                // out[17]
         }
     }
 }

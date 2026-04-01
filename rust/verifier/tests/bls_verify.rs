@@ -236,7 +236,7 @@ fn test_full_verify() {
 	// ── 3. BLS sign and aggregate ──
 	// Hash message to G1 using w3f/bls convention
 	let raw_msg = b"test message for full verify";
-	let w3f_message = w3f_bls::Message::new(b"", raw_msg);
+	let w3f_message = w3f_bls::Message::new_assuming_pop(b"", raw_msg);
 	let h_m_proj = w3f_message.hash_to_signature_curve::<w3f_bls::TinyBLS381>();
 	// Transmute ark 0.4 → ark 0.5 (identical memory layout)
 	let h_m: G1Affine = unsafe {
@@ -326,7 +326,7 @@ fn test_hash_to_g1() {
 	let raw_msg = b"hello world";
 
 	// Compute expected point via w3f/bls
-	let message = Message::new(context, raw_msg);
+	let message = Message::new_assuming_pop(context, raw_msg);
 	let expected_proj = message.hash_to_signature_curve::<TinyBLS381>();
 
 	// Convert w3f/bls output (ark 0.4 G1Affine) to bytes32[3] for comparison.
@@ -338,16 +338,15 @@ fn test_hash_to_g1() {
 		g1_to_bytes32x3(&affine_v5)
 	};
 
-	// w3f/bls prepends cipher_suite || context to the raw message
-	let cipher_suite = b"BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_";
-	let full_msg = [&cipher_suite[..], context.as_slice(), raw_msg.as_slice()].concat();
+	// Contract prepends cipher suite internally, just pass context || raw_msg
+	let msg_input = [context.as_slice(), raw_msg.as_slice()].concat();
 
 	// Deploy contract and call hashToG1
 	let mut evm = create_evm();
 	let mut nonce = 0u64;
 	let contract = deploy_contracts(&mut evm, &mut nonce);
 
-	let calldata = hashToG1Call { message: full_msg.into() }.abi_encode();
+	let calldata = hashToG1Call { message: msg_input.into() }.abi_encode();
 
 	let result = call(&mut evm, &mut nonce, contract, Bytes::from(calldata));
 
