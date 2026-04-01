@@ -105,4 +105,4 @@ jobs:
           key: plonk-srs-power23
 
       - name: Prove and verify (PLONK)
-        run: cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored --nocapture
+        run: cargo test -p gnark-plonk-verifier -- --ignored --nocapture
