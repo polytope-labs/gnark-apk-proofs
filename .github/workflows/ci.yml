@@ -45,9 +45,9 @@ jobs:
 
       - uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run Foundry tests
+      - name: Build Solidity contracts
         working-directory: solidity
-        run: forge test -vvv
+        run: forge build
 
   rust:
     name: Rust prover
@@ -55,6 +55,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-go@v5
         with:
@@ -68,6 +70,12 @@ jobs:
           components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build Solidity artifacts
+        working-directory: solidity
+        run: forge build
 
       - name: Build
         run: cargo build
@@ -88,6 +96,8 @@ jobs:
     needs: rust
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - uses: actions/setup-go@v5
         with:
@@ -98,6 +108,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Build Solidity artifacts
+        working-directory: solidity
+        run: forge build
+
       - name: Cache KZG SRS
         uses: actions/cache@v4
         with:
@@ -105,4 +121,4 @@ jobs:
           key: plonk-srs-power23
 
       - name: Prove and verify (PLONK)
-        run: cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored --nocapture
+        run: cargo test -p gnark-plonk-verifier -- --ignored --nocapture

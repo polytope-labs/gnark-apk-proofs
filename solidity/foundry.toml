@@ -5,4 +5,8 @@ test = "test"
 libs = ["lib"]
 evm_version = "prague"
 solc_version = "0.8.28"
-fs_permissions = [{ access = "read", path = "test/fixtures" }]
+via_ir = true
+
+[lint]
+exclude_lints = ["screaming-snake-case-immutable"]
+ignore = ["contracts/PlonkVerifier.sol"]

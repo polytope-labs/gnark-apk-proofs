@@ -13,3 +13,10 @@ thiserror = "2"
 
 [dev-dependencies]
 gnark-apk-prover = { path = "../prover", features = ["test-utils"] }
+ark-std = "0.5"
+revm = "36"
+alloy-sol-types = "1"
+alloy-primitives = "1"
+serde_json = "1"
+hex = "0.4"
+w3f-bls = "0.1.9"

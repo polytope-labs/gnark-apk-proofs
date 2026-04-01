@@ -14,6 +14,8 @@ The circuit:
 
 Rogue key attacks are prevented by requiring Proof of Possession (PoP) at registration.
 
+The on-chain verifier combines APK proof verification (PLONK) with BLS aggregate signature verification in a single call, using EIP-2537 precompiles for BLS12-381 curve operations. It also provides an on-chain `hashToG1` function compatible with [w3f/bls](https://github.com/w3f/bls).
+
 ## Project Structure
 
 ```
@@ -27,13 +29,12 @@ gnark-apk-proofs/
 ├── rust/                      # Rust proving library
 │   ├── ffi/                   # Low-level FFI bindings (builds Go into static archive)
 │   ├── prover/                # Safe Rust API with builder pattern
-│   └── verifier/              # Pure-Rust PLONK verifier (arkworks)
+│   └── verifier/              # Pure-Rust PLONK verifier (arkworks) + e2e tests
 ├── solidity/                  # Foundry/Solidity contracts
 │   ├── foundry.toml
 │   └── contracts/
 │       ├── PlonkVerifier.sol  # Auto-generated gnark PLONK verifier
-│       ├── ApkProof.sol       # Human-readable wrapper
-│       └── test/              # Gas benchmarks + proof fixtures
+│       └── ApkProof.sol       # APK proof + BLS signature verifier + hashToG1
 └── README.md
 ```
 
@@ -59,14 +60,42 @@ gnark-apk-proofs/
 
 ### On-chain (Solidity, EIP-2537, Prague EVM)
 
-| Metric            | Value                    |
-|-------------------|--------------------------|
-| Verification gas  | 385,183                  |
-| Contract bytecode | 11,607 bytes             |
-| Proof size        | 1,184 bytes              |
-| Public inputs     | 960 bytes (30 x uint256) |
+| Operation                       | Gas     |
+|---------------------------------|---------|
+| Full verify (APK proof + BLS)   | 550,709 |
+| hashToG1                        | 38,256  |
+
+| Metric            | Value                |
+|-------------------|----------------------|
+| Proof size        | 1,184 bytes          |
+| Public inputs     | 576 bytes (18 x uint256) |
 
 PLONK uses a universal SRS (no per-circuit trusted setup). Requires Pectra hardfork (EIP-2537 BLS12-381 precompiles).
+
+## Solidity Contract
+
+The `ApkProof` contract provides:
+
+1. **`verify()`** — Combined APK proof + BLS aggregate signature verification in one call
+2. **`hashToG1()`** — On-chain hash-to-curve (RFC 9380) compatible with [w3f/bls](https://github.com/w3f/bls)
+
+```solidity
+// Hash a message to G1 (w3f/bls compatible, cipher suite prepended internally)
+bytes32[3] memory h_m = apkProof.hashToG1(message);
+
+// Verify APK proof + BLS signature
+apkProof.verify(
+    PublicInputs({
+        publicKeysCommitment: commitment,
+        bitlist: bitlist,
+        apk: aggregatePublicKey    // seed added on-chain
+    }),
+    plonkProof,
+    h_m,                           // H(m) ∈ G1
+    aggregateSignature,            // bytes32[3]
+    aggregatePublicKeyG2           // bytes32[6]
+);
+```
 
 ## Rust Library
 
@@ -97,7 +126,7 @@ let proof = ProofBuilder::new(&ctx)
     .prove()?;
 
 // proof.proof_bytes  — ready for Solidity verifier (1184 bytes)
-// proof.public_inputs — 960 bytes (30 x uint256)
+// proof.public_inputs — 576 bytes (18 x uint256)
 ```
 
 ### Build
@@ -108,10 +137,10 @@ cargo build
 
 ### End-to-end test
 
-Generates a PLONK proof via Go FFI and verifies it with the pure-Rust verifier:
+Generates a PLONK proof via Go FFI, signs with BLS (using w3f/bls hash-to-curve), and verifies on-chain in revm:
 
 ```bash
-cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored
+cargo test -p gnark-plonk-verifier --test bls_verify -- --ignored --nocapture
 ```
 
 ## Go Circuit
@@ -119,7 +148,7 @@ cargo test -p gnark-plonk-verifier --test verify_proof -- --ignored
 ### Prerequisites
 
 - Go 1.25+
-- [Foundry](https://book.getfoundry.sh/) (for Solidity tests)
+- [Foundry](https://book.getfoundry.sh/) (for Solidity compilation)
 
 ### Run circuit tests
 
@@ -135,30 +164,13 @@ cd circuits
 go test -v -run "TestExportPlonkForFoundry" -timeout 30m ./apk/
 ```
 
-## Solidity Verifiers
-
-The `ApkProof` contract provides a human-readable API that accepts raw BLS12-381 G1 points (96-byte uncompressed format) and handles the gnark witness encoding internally. It wraps the auto-generated `PlonkVerifier` directly:
-
-```solidity
-apkProof.verify(ApkPublicInputs({
-    bitlist: [...],
-    publicKeysCommitment: ...,
-    apk: aggregatePublicKey         // 96-byte G1 point (seed added on-chain)
-}));
-```
-
-### Run Solidity gas benchmarks
-
-```bash
-cd solidity
-forge test -vvv
-```
-
 ## References
 
 - [gnark](https://github.com/consensys/gnark) — ZKP framework
 - [Accountable Light Client Systems for PoS Blockchains](https://eprint.iacr.org/2022/1205) — Ciobotaru et al., 2022
+- [Efficient Aggregatable BLS Signatures with Chaum-Pedersen Proofs](https://eprint.iacr.org/2022/1611) — BLS scheme
 - [EIP-2537](https://eips.ethereum.org/EIPS/eip-2537) — BLS12-381 precompiles
+- [w3f/bls](https://github.com/w3f/bls) — Web3 Foundation BLS library
 
 ## License
 
