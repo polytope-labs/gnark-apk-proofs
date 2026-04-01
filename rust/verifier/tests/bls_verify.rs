@@ -239,9 +239,11 @@ fn test_full_verify() {
 	let w3f_message = w3f_bls::Message::new(b"", raw_msg);
 	let h_m_proj = w3f_message.hash_to_signature_curve::<w3f_bls::TinyBLS381>();
 	// Transmute ark 0.4 → ark 0.5 (identical memory layout)
-	let h_m: G1Affine = unsafe { core::mem::transmute::<_, G1Affine>(
-		<w3f_bls::TinyBLS381 as w3f_bls::EngineBLS>::SignatureGroupAffine::from(h_m_proj)
-	) };
+	let h_m: G1Affine = unsafe {
+		core::mem::transmute::<_, G1Affine>(
+			<w3f_bls::TinyBLS381 as w3f_bls::EngineBLS>::SignatureGroupAffine::from(h_m_proj),
+		)
+	};
 
 	let sigs: Vec<G1Projective> = participation
 		.iter()
@@ -345,10 +347,7 @@ fn test_hash_to_g1() {
 	let mut nonce = 0u64;
 	let contract = deploy_contracts(&mut evm, &mut nonce);
 
-	let calldata = hashToG1Call {
-		message: full_msg.into(),
-	}
-	.abi_encode();
+	let calldata = hashToG1Call { message: full_msg.into() }.abi_encode();
 
 	let result = call(&mut evm, &mut nonce, contract, Bytes::from(calldata));
 
