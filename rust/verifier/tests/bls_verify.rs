@@ -9,9 +9,9 @@
 
 use alloy_primitives::{Bytes, FixedBytes, TxKind, U256};
 use alloy_sol_types::{sol, SolCall};
-use ark_bls12_381::{Fr, G1Affine, G1Projective, G2Affine, G2Projective};
+use ark_bls12_381::{G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup};
-use ark_ff::{PrimeField, UniformRand};
+use ark_ff::PrimeField;
 use ark_std::rand::SeedableRng;
 use gnark_apk_prover::{ProofBuilder, ProverContext, NUM_VALIDATORS};
 use revm::{
@@ -190,28 +190,43 @@ fn deploy_contracts(evm: &mut Evm, nonce: &mut u64) -> alloy_primitives::Address
 
 // ─── Test ────────────────────────────────────────────────────────────────────
 
-/// Full end-to-end: generate keypairs → APK proof via Go FFI → BLS sign →
+/// Full end-to-end: generate keypairs via w3f/bls → APK proof via Go FFI →
+/// BLS sign with w3f/bls → verify PLONK proof with Rust verifier →
 /// combined `verify()` on revm (PLONK proof + BLS signature in one call).
 ///
 ///   cargo test -p gnark-plonk-verifier --test bls_verify -- --ignored --nocapture
 #[test]
 #[ignore = "requires SRS files and Go FFI prover (~2 min)"]
 fn test_full_verify() {
-	let mut rng = ark_std::rand::rngs::StdRng::seed_from_u64(99);
+	use w3f_bls::{EngineBLS, KeypairVT, Message, TinyBLS381};
+
+	let rng = ark_std::rand::rngs::StdRng::seed_from_u64(99);
 	let num_signers = (NUM_VALIDATORS * 2 / 3 + 1) as u16; // 683 of 1024
 
-	// ── 1. Generate keypairs (secret keys + G1/G2 public keys) ──
-	println!("Generating {} keypairs...", NUM_VALIDATORS);
-	let secret_keys: Vec<Fr> = (0..NUM_VALIDATORS).map(|_| Fr::rand(&mut rng)).collect();
+	// ── 1. Generate w3f/bls keypairs ──
+	println!("Generating {} keypairs via w3f/bls...", NUM_VALIDATORS);
+	let keypairs: Vec<KeypairVT<TinyBLS381>> = {
+		let mut rng = rng;
+		(0..NUM_VALIDATORS).map(|_| KeypairVT::generate(&mut rng)).collect()
+	};
 
-	let g1_pks: Vec<G1Affine> = secret_keys
+	// Extract G1 public keys for APK circuit (sk * G1_generator).
+	// SecretKeyVT.0 is the raw scalar (ark 0.4 Fr) — transmute to ark 0.5.
+	let g1_pks: Vec<G1Affine> = keypairs
 		.iter()
-		.map(|sk| (G1Affine::generator().into_group() * sk).into_affine())
+		.map(|kp| {
+			let sk: ark_bls12_381::Fr = unsafe { core::mem::transmute(kp.secret.0) };
+			(G1Affine::generator().into_group() * sk).into_affine()
+		})
 		.collect();
 
-	let g2_pks: Vec<G2Affine> = secret_keys
+	// Extract G2 public keys from w3f/bls (PublicKey wraps G2Projective in ark 0.4).
+	let g2_pks: Vec<G2Affine> = keypairs
 		.iter()
-		.map(|sk| (G2Affine::generator().into_group() * sk).into_affine())
+		.map(|kp| {
+			let affine: <TinyBLS381 as EngineBLS>::PublicKeyGroupAffine = kp.public.0.into();
+			unsafe { core::mem::transmute::<_, G2Affine>(affine) }
+		})
 		.collect();
 
 	let participation: Vec<u16> = (0..num_signers).collect();
@@ -233,24 +248,36 @@ fn test_full_verify() {
 		apk_proof.public_inputs.len()
 	);
 
-	// ── 3. BLS sign and aggregate ──
-	// Hash message to G1 using w3f/bls convention
-	let raw_msg = b"test message for full verify";
-	let w3f_message = w3f_bls::Message::new_assuming_pop(b"", raw_msg);
-	let h_m_proj = w3f_message.hash_to_signature_curve::<w3f_bls::TinyBLS381>();
-	// Transmute ark 0.4 → ark 0.5 (identical memory layout)
-	let h_m: G1Affine = unsafe {
-		core::mem::transmute::<_, G1Affine>(
-			<w3f_bls::TinyBLS381 as w3f_bls::EngineBLS>::SignatureGroupAffine::from(h_m_proj),
-		)
-	};
+	// ── 3. Verify PLONK proof with Rust verifier ──
+	println!("Verifying PLONK proof with Rust verifier...");
+	let vk = ctx.verifying_key().expect("failed to load VK");
+	gnark_plonk_verifier::verify(&apk_proof.proof, &vk, &apk_proof.public_inputs)
+		.expect("Rust PLONK verification failed");
+	println!("Rust PLONK verification PASSED");
 
+	// ── 4. BLS sign with w3f/bls and aggregate ──
+	let raw_msg = b"test message for full verify";
+	let message = Message::new_assuming_pop(b"", raw_msg);
+
+	// Sign with each participating validator's w3f/bls keypair and aggregate
 	let sigs: Vec<G1Projective> = participation
 		.iter()
-		.map(|&i| h_m.into_group() * secret_keys[i as usize])
+		.map(|&i| {
+			let sig = keypairs[i as usize].sign(&message);
+			// Transmute ark 0.4 G1Projective → ark 0.5
+			unsafe { core::mem::transmute::<_, G1Projective>(sig.0) }
+		})
 		.collect();
 
 	let asig: G1Affine = sigs.iter().sum::<G1Projective>().into_affine();
+
+	// Hash message to G1 for the on-chain call
+	let h_m_proj = message.hash_to_signature_curve::<TinyBLS381>();
+	let h_m: G1Affine = unsafe {
+		core::mem::transmute::<_, G1Affine>(
+			<TinyBLS381 as EngineBLS>::SignatureGroupAffine::from(h_m_proj),
+		)
+	};
 
 	let apk1: G1Affine = participation
 		.iter()
@@ -271,7 +298,7 @@ fn test_full_verify() {
 		"off-chain BLS verification failed"
 	);
 
-	// ── 4. Build ApkPublicInputs struct ──
+	// ── 5. Build ApkPublicInputs struct ──
 	let raw_pi = apk_proof.public_inputs_calldata();
 	assert_eq!(raw_pi.len(), 18 * 32);
 
@@ -284,7 +311,7 @@ fn test_full_verify() {
 	let apk_inputs =
 		ApkPublicInputs { publicKeysCommitment: commitment, bitlist, apk: g1_to_bytes32x3(&apk1) };
 
-	// ── 5. Deploy and call combined verify() ──
+	// ── 6. Deploy and call combined verify() on revm ──
 	println!("Deploying contracts in revm...");
 	let mut evm = create_evm();
 	let mut nonce = 0u64;

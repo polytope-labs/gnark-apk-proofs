@@ -153,7 +153,7 @@ contract ApkProof {
         if (!_plonk.Verify(apkProof, encoded)) revert PlonkVerificationFailed();
 
         // Verify BLS aggregate signature using apk from the proof inputs
-        if (!_verifyBls(apkInputs, message, signature, apk2)) revert SignatureVerificationFailed();
+        if (!_verifyBls(apkInputs.apk, message, signature, apk2)) revert SignatureVerificationFailed();
     }
 
     /**
@@ -282,7 +282,6 @@ contract ApkProof {
 
     /**
      * @dev Derive challenge t and verify the BLS pairing check — all in assembly.
-     *      Reads apk1 directly from the struct's calldata slot, no memory copies.
      *
      *      Phase 1 — expand_message_xmd (SHA-256, empty DST, 48-byte output):
      *        msg_prime = Z_pad(64) ‖ message(96) ‖ sig(96) ‖ apk1(96) ‖ apk2(192) ‖ 0x00300000
@@ -293,7 +292,7 @@ contract ApkProof {
      *        e(sig + t·apk₁, -g₂) · e(msg + t·g₁, apk₂) = 1
      */
     function _verifyBls(
-        PublicInputs calldata apkInputs,
+        bytes32[3] calldata apk1,
         bytes32[3] calldata message,
         bytes32[3] calldata signature,
         bytes32[6] calldata apk2
@@ -301,9 +300,6 @@ contract ApkProof {
         assembly {
             let ptr := mload(0x40)
             let sha2 := 0x02
-
-            // apk1 sits at apkInputs + 192 in calldata (after commitment(32) + bitlist(160))
-            let apk1Off := add(apkInputs, 192)
 
             // ═══════════════════════════════════════════════════════════
             // Phase 1: derive challenge t
@@ -313,7 +309,7 @@ contract ApkProof {
             mstore(add(ptr, 0x20), 0)                               // Z_pad[32..63]
             calldatacopy(add(ptr, 0x40), message, 96)        // message
             calldatacopy(add(ptr, 0xA0), signature, 96)      // signature
-            calldatacopy(add(ptr, 0x100), apk1Off, 96)              // apk1 direct from struct
+            calldatacopy(add(ptr, 0x100), apk1, 96)                 // apk1
             calldatacopy(add(ptr, 0x160), apk2, 192)         // apk2
             mstore8(add(ptr, 0x220), 0x00)                          // I2OSP(48,2) high
             mstore8(add(ptr, 0x221), 0x30)                          // I2OSP(48,2) low
@@ -371,12 +367,12 @@ contract ApkProof {
             mstore(add(ptr, 0x2C0), 0)
             calldatacopy(add(ptr, 0x2D0), add(apk2Off, 144), 48)
 
-            // G1MSM(apk₁, t) → t·apk₁ — direct from calldata
+            // G1MSM(apk₁, t) → t·apk₁
             let msmIn := add(ptr, 0x300)
             mstore(msmIn, 0)
-            calldatacopy(add(msmIn, 0x10), apk1Off, 48)
+            calldatacopy(add(msmIn, 0x10), apk1, 48)
             mstore(add(msmIn, 0x40), 0)
-            calldatacopy(add(msmIn, 0x50), add(apk1Off, 48), 48)
+            calldatacopy(add(msmIn, 0x50), add(apk1, 48), 48)
             mstore(add(msmIn, 0x80), t)
 
             let msmOut := add(ptr, 0x3A0)
