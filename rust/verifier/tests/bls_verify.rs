@@ -274,9 +274,9 @@ fn test_full_verify() {
 	// Hash message to G1 for the on-chain call
 	let h_m_proj = message.hash_to_signature_curve::<TinyBLS381>();
 	let h_m: G1Affine = unsafe {
-		core::mem::transmute::<_, G1Affine>(
-			<TinyBLS381 as EngineBLS>::SignatureGroupAffine::from(h_m_proj),
-		)
+		core::mem::transmute::<_, G1Affine>(<TinyBLS381 as EngineBLS>::SignatureGroupAffine::from(
+			h_m_proj,
+		))
 	};
 
 	let apk1: G1Affine = participation
