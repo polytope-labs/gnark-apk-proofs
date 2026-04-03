@@ -164,11 +164,11 @@ contract ApkProof {
      * @param message The raw message to hash.
      * @return result Uncompressed G1 point as bytes32[3] (X ‖ Y, 96 bytes).
      */
-    function hashToG1(bytes calldata message) public view returns (bytes32[3] memory result) {
+    function hashToG1(bytes memory message) public view returns (bytes32[3] memory result) {
         assembly {
             let ptr := mload(0x40)
             let sha2 := 0x02
-            let msgLen := message.length
+            let msgLen := mload(message)
 
             // ═══════════════════════════════════════════════════════════
             // Phase 1: expand_message_xmd (SHA-256, DST=0x01, 128-byte output)
@@ -181,7 +181,7 @@ contract ApkProof {
             mstore(add(ptr, 0x20), 0)                                // Z_pad[32..63]
             mstore(add(ptr, 0x40), CIPHER_SUITE_FIRST_32)            // cipher[0..31]
             mstore(add(ptr, 0x60), shl(168, CIPHER_SUITE_LAST_11))   // cipher[32..42]
-            calldatacopy(add(ptr, 0x6B), message.offset, msgLen)     // message
+            mcopy(add(ptr, 0x6B), add(message, 0x20), msgLen)        // message
             let pos := add(add(ptr, 0x6B), msgLen)
             mstore8(pos, 0x00)                                       // I2OSP(128,2) high
             mstore8(add(pos, 1), 0x80)                               // I2OSP(128,2) low
