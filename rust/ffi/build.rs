@@ -35,7 +35,8 @@ fn main() {
 	// at build time. The default build is unchanged CPU-only.
 	let cuda = env::var("GNARK_APK_CUDA").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
 	let cuda_dirs = || {
-		let gnark_cuda = env::var("GNARK_CUDA_DIR").expect("GNARK_APK_CUDA set but GNARK_CUDA_DIR is not");
+		let gnark_cuda =
+			env::var("GNARK_CUDA_DIR").expect("GNARK_APK_CUDA set but GNARK_CUDA_DIR is not");
 		let icicle = env::var("ICICLE_DIR").expect("GNARK_APK_CUDA set but ICICLE_DIR is not");
 		let cuda_dir = env::var("CUDA_DIR").unwrap_or_else(|_| "/usr/local/cuda".to_string());
 		(gnark_cuda, icicle, cuda_dir)
@@ -49,7 +50,10 @@ fn main() {
 		build.env("CGO_CFLAGS", format!("-I{gnark_cuda}/include"));
 		build.env("CGO_LDFLAGS", format!("-L{gnark_cuda}/build -L{icicle}/lib -L{cuda_dir}/lib64"));
 	}
-	build.arg(format!("-o={}", archive_path.display())).arg("./ffi/").current_dir(&circuits_dir);
+	build
+		.arg(format!("-o={}", archive_path.display()))
+		.arg("./ffi/")
+		.current_dir(&circuits_dir);
 
 	let status = build.status().expect("failed to run `go build` — is Go installed?");
 	assert!(status.success(), "go build -buildmode=c-archive failed");
@@ -66,7 +70,9 @@ fn main() {
 	// so the resulting binary resolves the GPU symbols (matches the gpu package's #cgo LDFLAGS).
 	if cuda {
 		let (gnark_cuda, icicle, cuda_dir) = cuda_dirs();
-		for dir in [format!("{gnark_cuda}/build"), format!("{icicle}/lib"), format!("{cuda_dir}/lib64")] {
+		for dir in
+			[format!("{gnark_cuda}/build"), format!("{icicle}/lib"), format!("{cuda_dir}/lib64")]
+		{
 			println!("cargo:rustc-link-search=native={dir}");
 			println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
 		}
