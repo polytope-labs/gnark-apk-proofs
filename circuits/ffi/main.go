@@ -106,14 +106,14 @@ func ApkSetup(srsDir *C.char) C.uint64_t {
 		return 0
 	}
 
-	// Cache VK to disk if not already present.
+	// Write the VK for the circuit we just compiled. Always overwrite: the VK is
+	// circuit-dependent, so a cached file from an older circuit revision (or
+	// restored from a CI cache) would be stale and fail verification.
 	if dir != "" {
 		vkPath := dir + "/plonk_vk.bin"
-		if _, err := os.Stat(vkPath); os.IsNotExist(err) {
-			if f, err := os.Create(vkPath); err == nil {
-				vk.WriteTo(f)
-				f.Close()
-			}
+		if f, err := os.Create(vkPath); err == nil {
+			vk.WriteTo(f)
+			f.Close()
 		}
 	}
 
