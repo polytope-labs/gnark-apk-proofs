@@ -3,4 +3,9 @@ name = "gnark-apk-ffi"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Build the CUDA-accelerated icicle PLONK prover (Go `-tags cuda`). Requires libgnark_cuda
+# + icicle at build time via GNARK_CUDA_DIR / ICICLE_DIR (see build.rs). Default is CPU-only.
+cuda = []
+
 [build-dependencies]

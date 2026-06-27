@@ -30,14 +30,16 @@ fn main() {
 	let lib_name = "gnark_apk";
 	let archive_path = out_dir.join(format!("lib{lib_name}.a"));
 
-	// Opt into the CUDA-accelerated PLONK prover with GNARK_APK_CUDA=1. Requires libgnark_cuda
-	// (GNARK_CUDA_DIR) + icicle (ICICLE_DIR) + CUDA (CUDA_DIR, default /usr/local/cuda) present
-	// at build time. The default build is unchanged CPU-only.
-	let cuda = env::var("GNARK_APK_CUDA").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
+	// Opt into the CUDA-accelerated icicle PLONK prover with the `cuda` cargo feature (or, for
+	// ad-hoc builds, GNARK_APK_CUDA=1). Requires libgnark_cuda (GNARK_CUDA_DIR) + icicle
+	// (ICICLE_DIR) + CUDA (CUDA_DIR, default /usr/local/cuda) at build time. Default = CPU-only.
+	let cuda = env::var_os("CARGO_FEATURE_CUDA").is_some() ||
+		env::var("GNARK_APK_CUDA").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
 	let cuda_dirs = || {
 		let gnark_cuda =
-			env::var("GNARK_CUDA_DIR").expect("GNARK_APK_CUDA set but GNARK_CUDA_DIR is not");
-		let icicle = env::var("ICICLE_DIR").expect("GNARK_APK_CUDA set but ICICLE_DIR is not");
+			env::var("GNARK_CUDA_DIR").expect("cuda feature enabled but GNARK_CUDA_DIR is not set");
+		let icicle =
+			env::var("ICICLE_DIR").expect("cuda feature enabled but ICICLE_DIR is not set");
 		let cuda_dir = env::var("CUDA_DIR").unwrap_or_else(|_| "/usr/local/cuda".to_string());
 		(gnark_cuda, icicle, cuda_dir)
 	};

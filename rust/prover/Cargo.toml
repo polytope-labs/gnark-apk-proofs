@@ -6,6 +6,9 @@ edition = "2021"
 
 [features]
 test-utils = ["ark-std"]
+# CUDA-accelerated icicle GPU PLONK backend. Builds the Go prover with `-tags cuda` and links
+# libgnark_cuda + icicle (paths via GNARK_CUDA_DIR / ICICLE_DIR). Default build stays CPU-only.
+cuda = ["gnark-apk-ffi/cuda"]
 
 [dependencies]
 gnark-apk-ffi = { path = "../ffi" }
