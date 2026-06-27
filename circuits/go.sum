@@ -33,6 +33,8 @@ github.com/polytope-labs/gnark v0.14.1-0.20260627054553-a218ac400c63 h1:Mwzp7K/k
 github.com/polytope-labs/gnark v0.14.1-0.20260627054553-a218ac400c63/go.mod h1:FSzupnbC0f6Y4CTu8NqNU/t6Zr2fFdwK9jYcdmpygzQ=
 github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52 h1:IUjxVgLuT0oPRh4/DZwOrAbMGEn7I/iTymlQhMAJtE8=
 github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52/go.mod h1:+j81sZg88Uj5ZO9Gvv7F8jDyeNftVP0RdfudemswRlc=
+github.com/polytope-labs/gnark v0.14.1-0.20260627072919-a48f6dcb2046 h1:BA/jaeb8/dugxvFrSibVNzfF/oQfMMW4DPZ2D6Tw6x8=
+github.com/polytope-labs/gnark v0.14.1-0.20260627072919-a48f6dcb2046/go.mod h1:+j81sZg88Uj5ZO9Gvv7F8jDyeNftVP0RdfudemswRlc=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4 h1:vERj9i4nCU24ZDbjUG+ZQ+rwpQoU3vlPSK8rGNAuD2o=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4/go.mod h1:LlrRbe6b7BIune9Un5L6sRTUUWrAIIqGK+L0duYwpoM=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627065507-29332550599a h1:09DUbbpI/cOs1scH2pAC4fik17CQooO4HJ2zE5Wcqx8=
