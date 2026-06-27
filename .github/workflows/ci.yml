@@ -90,10 +90,20 @@ jobs:
         run: cargo +stable clippy -- -D warnings
 
   rust-e2e:
-    name: Rust e2e (prove + verify)
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
+    name: Rust e2e (prove + verify, GPU)
+    # Runs on a self-hosted CUDA runner: register a runner with the `cuda` label that has
+    # libgnark_cuda + icicle built, and set repo variables GNARK_CUDA_DIR / ICICLE_DIR (and
+    # optionally CUDA_DIR, default /usr/local/cuda). The full 7.1M-constraint prove is
+    # impractical on a CPU runner; the GPU prover does it in ~12.5s.
+    runs-on: [self-hosted, cuda]
+    timeout-minutes: 60
     needs: rust
+    env:
+      GNARK_APK_CUDA: "1"
+      GNARK_CUDA_DIR: ${{ vars.GNARK_CUDA_DIR }}
+      ICICLE_DIR: ${{ vars.ICICLE_DIR }}
+      CUDA_DIR: ${{ vars.CUDA_DIR || '/usr/local/cuda' }}
+      LD_LIBRARY_PATH: ${{ vars.GNARK_CUDA_DIR }}/build:${{ vars.ICICLE_DIR }}/lib:${{ vars.CUDA_DIR || '/usr/local/cuda' }}/lib64
     steps:
       - uses: actions/checkout@v4
         with:
