@@ -31,8 +31,12 @@ github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZb
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/polytope-labs/gnark v0.14.1-0.20260627054553-a218ac400c63 h1:Mwzp7K/kl7kvf0p7ohsalGdWsu83k6mAn0ZEphuhAOw=
 github.com/polytope-labs/gnark v0.14.1-0.20260627054553-a218ac400c63/go.mod h1:FSzupnbC0f6Y4CTu8NqNU/t6Zr2fFdwK9jYcdmpygzQ=
+github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52 h1:IUjxVgLuT0oPRh4/DZwOrAbMGEn7I/iTymlQhMAJtE8=
+github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52/go.mod h1:+j81sZg88Uj5ZO9Gvv7F8jDyeNftVP0RdfudemswRlc=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4 h1:vERj9i4nCU24ZDbjUG+ZQ+rwpQoU3vlPSK8rGNAuD2o=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4/go.mod h1:LlrRbe6b7BIune9Un5L6sRTUUWrAIIqGK+L0duYwpoM=
+github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627065507-29332550599a h1:09DUbbpI/cOs1scH2pAC4fik17CQooO4HJ2zE5Wcqx8=
+github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627065507-29332550599a/go.mod h1:LlrRbe6b7BIune9Un5L6sRTUUWrAIIqGK+L0duYwpoM=
 github.com/rogpeppe/go-internal v1.12.0 h1:exVL4IDcn6na9z1rAb56Vxr+CgyK3nn3O+epU5NdKM8=
 github.com/rogpeppe/go-internal v1.12.0/go.mod h1:E+RYuTGaKKdloAfM02xzb0FW3Paa99yedzYV+kq4uf4=
 github.com/ronanh/intcomp v1.1.1 h1:+1bGV/wEBiHI0FvzS7RHgzqOpfbBJzLIxkqMJ9e6yxY=
