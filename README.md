@@ -16,6 +16,26 @@ Rogue key attacks are prevented by requiring Proof of Possession (PoP) at regist
 
 The on-chain verifier combines APK proof verification (PLONK) with BLS aggregate signature verification in a single call, using EIP-2537 precompiles for BLS12-381 curve operations. It also provides an on-chain `hashToG1` function compatible with [w3f/bls](https://github.com/w3f/bls).
 
+## Proving backends (CPU / GPU)
+
+The circuit (1024 validators, ~7.1M constraints) proves under either backend; both produce identical proofs verified by the same Solidity/Rust verifier.
+
+| Backend | Build | Hardware | Prove time |
+|---|---|---|---|
+| **CPU** (default) | `go build` / `cargo build` | any | minutes (RAM-heavy) |
+| **GPU** (CUDA) | `go build -tags cuda` | NVIDIA + CUDA | **~12.5s** (RTX 5090) |
+
+The GPU path is a device-resident PLONK prover built on a [gnark fork](https://github.com/polytope-labs/gnark) (`gpu-plonk-prover` branch) + [libgnark_cuda](https://github.com/polytope-labs/gnark-cuda) (icicle/CUDA). It keeps the proof's polynomials on the device across the whole pipeline and is gated entirely behind `-tags cuda` — the default build is unchanged CPU-only. Building it requires libgnark_cuda + icicle at build time:
+
+```bash
+cd circuits
+CGO_CFLAGS="-I<gnark-cuda>/include" \
+CGO_LDFLAGS="-L<gnark-cuda>/build -L<icicle-install>/lib -L/usr/local/cuda/lib64" \
+go test -tags cuda -run TestPlonkProveAndVerify -timeout 30m ./apk/
+```
+
+> Note: the **Rust FFI** (`rust/ffi`) and the Rust `ProverContext` currently build the **CPU** prover. The full GPU prove is impractical on CPU CI runners; run it with `-tags cuda` on a CUDA host, or via the Go test above.
+
 ## Project Structure
 
 ```

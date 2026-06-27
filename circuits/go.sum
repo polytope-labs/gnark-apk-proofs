@@ -2,6 +2,8 @@ github.com/bits-and-blooms/bitset v1.24.4 h1:95H15Og1clikBrKr/DuzMXkQzECs1M6hhoG
 github.com/bits-and-blooms/bitset v1.24.4/go.mod h1:7hO7Gc7Pp1vODcmWvKMRA9BNmbv6a/7QIWpPxHddWR8=
 github.com/blang/semver/v4 v4.0.0 h1:1PFHFE6yCCTv8C1TeyNNarDzntLi7wMI5i/pzqYIsAM=
 github.com/blang/semver/v4 v4.0.0/go.mod h1:IbckMUScFkM3pff0VJDNKRiT6TG/YpiHIM2yvyW5YoQ=
+github.com/consensys/gnark-crypto v0.19.3-0.20260210233638-4abc1c162a65 h1:uqG0l8Ou1qcqu2S+vRNn1ye7tw92x3R1UFzYiJemHI0=
+github.com/consensys/gnark-crypto v0.19.3-0.20260210233638-4abc1c162a65/go.mod h1:LlrRbe6b7BIune9Un5L6sRTUUWrAIIqGK+L0duYwpoM=
 github.com/coreos/go-systemd/v22 v22.5.0/go.mod h1:Y58oyj3AT4RCenI/lSvhwexgC+NSVTIJ3seZv2GcEnc=
 github.com/creack/pty v1.1.9/go.mod h1:oKZEueFk5CKHvIhNR5MUki03XCEU+Q6VDXinZuGJ33E=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
@@ -35,6 +37,8 @@ github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52 h1:IUjxVgLu
 github.com/polytope-labs/gnark v0.14.1-0.20260627070508-690fe23a4b52/go.mod h1:+j81sZg88Uj5ZO9Gvv7F8jDyeNftVP0RdfudemswRlc=
 github.com/polytope-labs/gnark v0.14.1-0.20260627072919-a48f6dcb2046 h1:BA/jaeb8/dugxvFrSibVNzfF/oQfMMW4DPZ2D6Tw6x8=
 github.com/polytope-labs/gnark v0.14.1-0.20260627072919-a48f6dcb2046/go.mod h1:+j81sZg88Uj5ZO9Gvv7F8jDyeNftVP0RdfudemswRlc=
+github.com/polytope-labs/gnark v0.14.1-0.20260627204834-4a0e645cc303 h1:dVFeon7e3pa1YKVCJJzX1dyFc+qxyeMupsDXgSXXfYI=
+github.com/polytope-labs/gnark v0.14.1-0.20260627204834-4a0e645cc303/go.mod h1:FSzupnbC0f6Y4CTu8NqNU/t6Zr2fFdwK9jYcdmpygzQ=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4 h1:vERj9i4nCU24ZDbjUG+ZQ+rwpQoU3vlPSK8rGNAuD2o=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627055246-3f4c22edaaa4/go.mod h1:LlrRbe6b7BIune9Un5L6sRTUUWrAIIqGK+L0duYwpoM=
 github.com/polytope-labs/gnark-crypto v0.19.3-0.20260627065507-29332550599a h1:09DUbbpI/cOs1scH2pAC4fik17CQooO4HJ2zE5Wcqx8=
