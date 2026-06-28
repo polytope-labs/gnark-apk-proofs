@@ -107,53 +107,40 @@ contract ApkProof {
         0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f624;
     uint256 private constant BLS_P_LAST_16 = 0x1eabfffeb153ffffb9feffffffffaaab;
 
-    /** @notice Public inputs for the APK proof circuit. */
-    struct PublicInputs {
-        /**
-         * Poseidon2 hash commitment over all 1024 validator public keys.
-         * Computed as: Poseidon2(pk_0.X.limbs || pk_0.Y.limbs || ... || pk_1023.Y.limbs)
-         * where each Fp coordinate is decomposed into 6 x 64-bit little-endian limbs
-         * (12 limbs per G1 point, 12288 field elements total).
-         */
-        uint256 publicKeysCommitment;
-        /**
-         * Bitlist encoding participating validators (5 field elements).
-         * bitlist[0..3] encode 250 bits each, bitlist[4] encodes 24 bits.
-         */
-        uint256[5] bitlist;
-        /**
-         * Aggregate public key of participating validators: apk = sum(b_i * pk_i).
-         * 96 bytes: X (48 bytes big-endian) || Y (48 bytes big-endian).
-         * Note: The circuit expects seed + apk; the contract adds the seed automatically.
-         */
-        bytes32[3] apk;
-    }
-
     constructor(address _verifier) {
         _plonk = PlonkVerifier(_verifier);
     }
 
     /**
      * @notice Verify both APK aggregation proof and aggregate BLS signature in one call.
-     * @param apkInputs   Structured public inputs for the APK proof.
+     * @param publicKeysCommitment Poseidon2 hash commitment over all 1024 validator public
+     *        keys: Poseidon2(pk_0.X.limbs || ... || pk_1023.Y.limbs), each Fp coordinate
+     *        decomposed into 6 x 64-bit little-endian limbs (12 limbs per G1 point).
+     * @param bitlist     Participating-validator bitlist (5 field elements); bitlist[0..3]
+     *        encode 250 bits each, bitlist[4] encodes 24 bits.
+     * @param apk         Aggregate public key of participants apk = sum(b_i * pk_i) ∈ G1,
+     *        bytes32[3] (X ‖ Y, 96 bytes). The circuit expects seed + apk; the contract adds
+     *        the seed automatically.
      * @param apkProof    The serialized PLONK proof bytes.
      * @param message     H(m) ∈ G1, bytes32[3] (96 bytes).
      * @param signature   Aggregate signature ∈ G1, bytes32[3] (96 bytes).
      * @param apk2        Aggregate public key ∈ G2, bytes32[6] (192 bytes).
      */
     function verify(
-        PublicInputs calldata apkInputs,
+        uint256 publicKeysCommitment,
+        uint256[5] calldata bitlist,
+        bytes32[3] calldata apk,
         bytes calldata apkProof,
         bytes32[3] calldata message,
         bytes32[3] calldata signature,
         bytes32[6] calldata apk2
     ) external view {
         // Verify APK aggregation proof
-        uint256[18] memory encoded = _encodePublicInputs(apkInputs);
+        uint256[18] memory encoded = _encodePublicInputs(publicKeysCommitment, bitlist, apk);
         if (!_plonk.Verify(apkProof, encoded)) revert PlonkVerificationFailed();
 
-        // Verify BLS aggregate signature using apk from the proof inputs
-        if (!_verifyBls(apkInputs.apk, message, signature, apk2)) revert SignatureVerificationFailed();
+        // Verify BLS aggregate signature using the supplied apk
+        if (!_verifyBls(apk, message, signature, apk2)) revert SignatureVerificationFailed();
     }
 
     /**
@@ -424,13 +411,16 @@ contract ApkProof {
     }
 
     /**
-     * @dev Encode structured public inputs into the flat uint256[18] format
+     * @dev Encode the public inputs into the flat uint256[18] format
      *      expected by the gnark verifier.
      *
-     *      Struct calldata layout: commitment(32) || bitlist(5*32) || apk(3*32)
-     *      Verifier expects:       out[0..4]=bitlist, out[5]=commitment, out[6..17]=apk limbs
+     *      Verifier expects: out[0..4]=bitlist, out[5]=commitment, out[6..17]=apk limbs
      */
-    function _encodePublicInputs(PublicInputs calldata inputs) internal view returns (uint256[18] memory out) {
+    function _encodePublicInputs(uint256 publicKeysCommitment, uint256[5] calldata bitlist, bytes32[3] calldata apk)
+        internal
+        view
+        returns (uint256[18] memory out)
+    {
         bytes32 s0 = SEED_0;
         bytes32 s1 = SEED_1;
         bytes32 s2 = SEED_2;
@@ -439,8 +429,8 @@ contract ApkProof {
             let mask := 0xFFFFFFFFFFFFFFFF
 
             // --- Copy bitlist and commitment into out[0..5] ---
-            calldatacopy(out, add(inputs, 32), 160)     // bitlist (5*32) → out[0..4]
-            calldatacopy(add(out, 160), inputs, 32)     // commitment     → out[5]
+            calldatacopy(out, bitlist, 160)             // bitlist (5*32) → out[0..4]
+            mstore(add(out, 160), publicKeysCommitment) // commitment     → out[5]
 
             /*
              * Build G1ADD input in scratch memory at out + 576.
@@ -478,8 +468,7 @@ contract ApkProof {
             mstore(add(scratch, 96), s2)
 
             // APK point from calldata (padded)
-            // apk offset in inputs = 192 (after commitment(32) + bitlist(160))
-            let apkOff := add(inputs, 192)
+            let apkOff := apk
             calldatacopy(add(scratch, 144), apkOff, 48)             // APK X
             calldatacopy(add(scratch, 208), add(apkOff, 48), 48)    // APK Y
 
