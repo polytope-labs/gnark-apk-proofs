@@ -14,7 +14,8 @@
 // limitations under the License.
 
 use std::{
-	env,
+	env, fs,
+	io::Write,
 	path::{Path, PathBuf},
 	process::Command,
 };
@@ -42,9 +43,9 @@ fn main() {
 	let archive_path = out_dir.join(format!("lib{lib_name}.a"));
 
 	// Enable the CUDA-accelerated icicle prover with the `cuda` cargo feature (GNARK_APK_CUDA=1
-	// also works for ad-hoc builds). When on, build.rs fetches + builds libgnark_cuda + icicle
-	// from source into OUT_DIR — no external libraries, paths, or env vars required. Default is
-	// the unchanged CPU-only prover.
+	// also works for ad-hoc builds). When on, build.rs fetches + builds open-icicle + gnark-cuda
+	// from source and links them *statically* into the binary — no external libraries, no paths,
+	// and no build- or run-time env vars. Default is the unchanged CPU-only prover.
 	let cuda = env::var_os("CARGO_FEATURE_CUDA").is_some() ||
 		env::var("GNARK_APK_CUDA").map(|v| !v.is_empty() && v != "0").unwrap_or(false);
 
@@ -56,15 +57,6 @@ fn main() {
 	if let Some(g) = &gpu {
 		build.arg("-tags").arg("cuda");
 		build.env("CGO_CFLAGS", format!("-I{}", g.include.display()));
-		build.env(
-			"CGO_LDFLAGS",
-			format!(
-				"-L{} -L{} -L{}",
-				g.gnark_cuda_lib.display(),
-				g.icicle_lib.display(),
-				g.cuda_lib.display()
-			),
-		);
 	}
 	build
 		.arg(format!("-o={}", archive_path.display()))
@@ -82,38 +74,44 @@ fn main() {
 	println!("cargo:rustc-link-lib=dylib=resolv");
 	println!("cargo:rustc-link-lib=dylib=pthread");
 
-	// Under -tags cuda the archive pulls in libgnark_cuda -> icicle -> CUDA; link + rpath them
-	// so the resulting binary resolves the GPU symbols (matches the gpu package's #cgo LDFLAGS).
+	// Link the GPU stack fully static so the binary is self-contained: only system libs end up
+	// as NEEDED, and it runs with no LD_LIBRARY_PATH / ICICLE_BACKEND_INSTALL_DIR.
 	if let Some(g) = &gpu {
-		for dir in [&g.gnark_cuda_lib, &g.icicle_lib, &g.cuda_lib] {
-			println!("cargo:rustc-link-search=native={}", dir.display());
-			println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
-		}
-		for lib in [
-			"gnark_cuda",
-			"icicle_field_bls12_381",
-			"icicle_curve_bls12_381",
-			"icicle_device",
-			"cudart",
-			"stdc++",
+		let lib = g.icicle_install.join("lib");
+		for dir in [
+			g.gnark_cuda_lib.clone(),
+			lib.clone(),
+			lib.join("backend/cuda"),
+			lib.join("backend/bls12_381/cuda"),
+			g.cuda_lib.clone(),
 		] {
-			println!("cargo:rustc-link-lib=dylib={lib}");
+			println!("cargo:rustc-link-search=native={}", dir.display());
 		}
-		// icicle dlopens its CUDA backend at runtime; expose the install path so the prover can
-		// point ICICLE_BACKEND_INSTALL_DIR at it (keeps running env-var-free too).
-		println!(
-			"cargo:rustc-env=GNARK_APK_ICICLE_BACKEND={}",
-			g.icicle_lib.join("backend").display()
-		);
-		// libgnark_cuda + icicle are NEEDED dylibs of the final binary. A dependency's build
-		// script can't add an rpath to a downstream binary (cargo limitation), so surface the
-		// loader path the binary needs — export it, or add these dirs to your binary's rpath.
-		println!(
-			"cargo:warning=gnark-apk(cuda): run with LD_LIBRARY_PATH={}:{}:{}",
-			g.gnark_cuda_lib.display(),
-			g.icicle_lib.display(),
-			g.cuda_lib.display()
-		);
+
+		// gnark-cuda shim (device symbols resolved into the .a).
+		println!("cargo:rustc-link-lib=static=gnark_cuda");
+		// icicle CUDA backend: --whole-archive so the static-init REGISTER_* registrars survive
+		// the linker's GC and run at program startup — this replaces the dlopen the shared build
+		// used, giving an in-binary device registry (no runtime backend dir).
+		for b in [
+			"icicle_backend_cuda_device",
+			"icicle_backend_cuda_field_bls12_381",
+			"icicle_backend_cuda_curve_bls12_381",
+		] {
+			println!("cargo:rustc-link-lib=static:+whole-archive={b}");
+		}
+		// icicle frontend (host-only).
+		for f in ["icicle_curve_bls12_381", "icicle_field_bls12_381", "icicle_device"] {
+			println!("cargo:rustc-link-lib=static={f}");
+		}
+		// The CUDA runtime + driver stay dynamic — the standard, supported way. Linking
+		// `cudart_static` here triggers `invalid resource handle` at kernel launch: its
+		// per-module runtime state doesn't survive being statically merged with icicle's
+		// device code. Only the project libraries (gnark-cuda + icicle) are static; the
+		// stock CUDA runtime is found on the loader path like for any CUDA program.
+		for s in ["cudart", "cuda", "stdc++", "dl", "rt", "m"] {
+			println!("cargo:rustc-link-lib=dylib={s}");
+		}
 	}
 
 	println!("cargo:rerun-if-changed={}", circuits_dir.join("ffi").display());
@@ -121,30 +119,30 @@ fn main() {
 	println!("cargo:rerun-if-env-changed=GNARK_APK_CUDA");
 }
 
-/// Link directories produced by building the GPU native dependencies.
+/// Link directories produced by building the GPU native dependencies (all static).
 struct GpuDeps {
 	/// gnark-cuda headers (for the cgo `-I`).
 	include: PathBuf,
-	/// Directory holding `libgnark_cuda.so`.
+	/// Directory holding `libgnark_cuda.a`.
 	gnark_cuda_lib: PathBuf,
-	/// icicle install `lib` directory (icicle libs + `backend/`).
-	icicle_lib: PathBuf,
-	/// CUDA runtime `lib64` directory.
+	/// icicle install prefix (its `lib/` holds the frontend + `backend/` static libs).
+	icicle_install: PathBuf,
+	/// CUDA toolkit `lib64` directory (holds `libcudart_static.a`, `libculibos.a`).
 	cuda_lib: PathBuf,
 }
 
-/// Fetch + build open-icicle and gnark-cuda from source into `out`, returning the link dirs.
-/// Each step is skipped when its output already exists, so only the first GPU build pays the
+/// Fetch open-icicle + gnark-cuda, patch them to build *static*, and build them into `out`.
+/// Each build is skipped when its output already exists, so only the first GPU build pays the
 /// (multi-minute) CUDA compile. Requires `git`, `cmake`, and the CUDA toolkit on PATH.
 fn build_gpu_deps(out: &Path) -> GpuDeps {
 	let cuda_home = env::var("CUDA_DIR").unwrap_or_else(|_| "/usr/local/cuda".to_string());
 	let cuda_lib = PathBuf::from(format!("{cuda_home}/lib64"));
 
-	// open-icicle: the generic MSM/NTT/vec CUDA backend gnark-cuda delegates to.
+	// open-icicle: the generic MSM/NTT/vec backend gnark-cuda delegates to.
 	let icicle_src = git_fetch(out, "open-icicle", OPEN_ICICLE_REPO, OPEN_ICICLE_REV);
 	let icicle_install = out.join("icicle-install");
-	let icicle_lib = icicle_install.join("lib");
-	if !icicle_lib.join("libicicle_device.so").exists() {
+	if !icicle_install.join("lib/libicicle_device.a").exists() {
+		patch_icicle_static(&icicle_src);
 		cmake(
 			&icicle_src.join("icicle"),
 			&out.join("icicle-build"),
@@ -162,7 +160,8 @@ fn build_gpu_deps(out: &Path) -> GpuDeps {
 	// gnark-cuda: the `gpu_*` C-ABI shim (icicle delegation + bespoke PLONK kernels).
 	let gc_src = git_fetch(out, "gnark-cuda", GNARK_CUDA_REPO, GNARK_CUDA_REV);
 	let gc_build = out.join("gnark-cuda-build");
-	if !gc_build.join("libgnark_cuda.so").exists() {
+	if !gc_build.join("libgnark_cuda.a").exists() {
+		patch_gnark_cuda_static(&gc_src);
 		cmake(
 			&gc_src,
 			&gc_build,
@@ -179,7 +178,75 @@ fn build_gpu_deps(out: &Path) -> GpuDeps {
 		);
 	}
 
-	GpuDeps { include: gc_src.join("include"), gnark_cuda_lib: gc_build, icicle_lib, cuda_lib }
+	GpuDeps { include: gc_src.join("include"), gnark_cuda_lib: gc_build, icicle_install, cuda_lib }
+}
+
+/// Patch open-icicle to build static libraries (it hardcodes `SHARED`) and to resolve CUDA
+/// device symbols into each backend `.a` so a host linker can consume them. Idempotent: resets
+/// the checkout to pristine first.
+fn patch_icicle_static(src: &Path) {
+	git_reset(src);
+	let ic = src.join("icicle");
+	replace(
+		&ic.join("CMakeLists.txt"),
+		"add_library(icicle_device SHARED",
+		"add_library(icicle_device STATIC",
+	);
+	replace(
+		&ic.join("cmake/curve.cmake"),
+		"add_library(icicle_curve SHARED)",
+		"add_library(icicle_curve STATIC)",
+	);
+	replace(
+		&ic.join("cmake/field.cmake"),
+		"add_library(icicle_field SHARED)",
+		"add_library(icicle_field STATIC)",
+	);
+	let backend = ic.join("backend/cuda/CMakeLists.txt");
+	replace(
+		&backend,
+		"add_library(icicle_backend_cuda_device SHARED",
+		"add_library(icicle_backend_cuda_device STATIC",
+	);
+	replace(
+		&backend,
+		"add_library(icicle_cuda_field SHARED",
+		"add_library(icicle_cuda_field STATIC",
+	);
+	replace(
+		&backend,
+		"add_library(icicle_cuda_curve SHARED",
+		"add_library(icicle_cuda_curve STATIC",
+	);
+	append(
+		&backend,
+		"\nforeach(t icicle_backend_cuda_device icicle_cuda_field icicle_cuda_curve)\n  \
+		 if(TARGET ${t})\n    set_target_properties(${t} PROPERTIES \
+		 CUDA_RESOLVE_DEVICE_SYMBOLS ON POSITION_INDEPENDENT_CODE ON)\n  endif()\nendforeach()\n",
+	);
+}
+
+/// Patch gnark-cuda to build a static library with its CUDA device symbols resolved.
+fn patch_gnark_cuda_static(src: &Path) {
+	git_reset(src);
+	let cml = src.join("CMakeLists.txt");
+	replace(&cml, "add_library(gnark_cuda SHARED", "add_library(gnark_cuda STATIC");
+	append(&cml, "\nset_target_properties(gnark_cuda PROPERTIES CUDA_RESOLVE_DEVICE_SYMBOLS ON)\n");
+}
+
+fn replace(path: &Path, from: &str, to: &str) {
+	let s = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+	assert!(s.contains(from), "patch anchor not found in {}: {from:?}", path.display());
+	fs::write(path, s.replace(from, to)).unwrap();
+}
+
+fn append(path: &Path, text: &str) {
+	let mut f = fs::OpenOptions::new().append(true).open(path).unwrap();
+	f.write_all(text.as_bytes()).unwrap();
+}
+
+fn git_reset(dir: &Path) {
+	run(Command::new("git").args(["checkout", "-q", "--", "."]).current_dir(dir));
 }
 
 /// Shallow-fetch a single pinned commit of `repo` into `out/<name>` (idempotent: a no-op once
@@ -194,7 +261,7 @@ fn git_fetch(out: &Path, name: &str, repo: &str, rev: &str) -> PathBuf {
 			.map(|o| String::from_utf8_lossy(&o.stdout).trim() == rev)
 			.unwrap_or(false);
 	if !at_rev {
-		std::fs::create_dir_all(&dir).unwrap();
+		fs::create_dir_all(&dir).unwrap();
 		if !dir.join(".git").exists() {
 			run(Command::new("git").args(["init", "-q"]).current_dir(&dir));
 			run(Command::new("git").args(["remote", "add", "origin", repo]).current_dir(&dir));

@@ -112,15 +112,6 @@ impl ProverContext {
 
 		let resolved_dir = effective_dir.map(|p| p.to_path_buf()).unwrap_or_else(default_srs_dir);
 
-		// icicle loads its CUDA backend from ICICLE_BACKEND_INSTALL_DIR at runtime; point it at
-		// the in-tree build (set by the ffi build.rs under the `cuda` feature) so GPU proving
-		// needs no runtime env vars either. No-op for the CPU build (dir is None).
-		if std::env::var_os("ICICLE_BACKEND_INSTALL_DIR").is_none() {
-			if let Some(dir) = gnark_apk_ffi::ICICLE_BACKEND_DIR {
-				std::env::set_var("ICICLE_BACKEND_INSTALL_DIR", dir);
-			}
-		}
-
 		let handle = unsafe { ApkSetup(srs_ptr) };
 		if handle == 0 {
 			return Err(ApkProverError::SetupFailed);

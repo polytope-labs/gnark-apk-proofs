@@ -13,10 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-/// Directory icicle dlopens its CUDA backend from at runtime. Set by build.rs when the `cuda`
-/// feature builds the GPU prover from source; `None` for the default CPU build.
-pub const ICICLE_BACKEND_DIR: Option<&str> = option_env!("GNARK_APK_ICICLE_BACKEND");
-
 #[repr(C)]
 pub struct CProveResult {
 	pub proof_data: *const u8,
