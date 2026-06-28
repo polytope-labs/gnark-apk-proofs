@@ -224,6 +224,12 @@ fn patch_icicle_static(src: &Path) {
 		 if(TARGET ${t})\n    set_target_properties(${t} PROPERTIES \
 		 CUDA_RESOLVE_DEVICE_SYMBOLS ON POSITION_INDEPENDENT_CODE ON)\n  endif()\nendforeach()\n",
 	);
+	// Quiet icicle's own startup logs: the dlopen "Failed to load backend" INFO is moot once the
+	// backend is statically registered, and the per-device "Registering DEVICE" DEBUG line is
+	// noise. Default the minimum log level to Warning (warnings/errors still print).
+	let log_h = ic.join("include/icicle/utils/log.h");
+	replace(&log_h, "s_min_log_level = eLogLevel::Info;", "s_min_log_level = eLogLevel::Warning;");
+	replace(&log_h, "s_min_log_level = eLogLevel::Debug;", "s_min_log_level = eLogLevel::Warning;");
 }
 
 /// Patch gnark-cuda to build a static library with its CUDA device symbols resolved.
