@@ -28,4 +28,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/consensys/gnark => github.com/polytope-labs/gnark v0.14.1-0.20260628081739-c40d9ec5c4ee
+replace github.com/consensys/gnark => github.com/polytope-labs/gnark v0.14.1-0.20260628104040-51f32e5caa82
