@@ -31,12 +31,14 @@
 //! # }
 //! ```
 
+pub mod commitment;
 pub mod error;
 pub mod proof;
 pub mod transcript;
 pub mod verifier;
 
 pub use ark_bls12_381::Fr;
+pub use commitment::{public_keys_commitment, public_keys_commitment_bytes};
 pub use error::VerifierError;
 pub use proof::{PlonkProof, VerifyingKey};
 pub use verifier::verify;
