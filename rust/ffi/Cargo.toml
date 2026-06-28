@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-# Build the CUDA-accelerated icicle PLONK prover (Go `-tags cuda`). Requires libgnark_cuda
-# + icicle at build time via GNARK_CUDA_DIR / ICICLE_DIR (see build.rs). Default is CPU-only.
+# Build the CUDA-accelerated icicle PLONK prover (Go `-tags cuda`). build.rs fetches + builds
+# open-icicle + gnark-cuda from source (needs CUDA toolkit + CMake + git). Default is CPU-only.
 cuda = []
 
 [build-dependencies]

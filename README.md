@@ -36,20 +36,19 @@ go test -tags cuda -run TestPlonkProveAndVerify -timeout 30m ./apk/
 
 ### GPU from the Rust prover
 
-The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature:
+The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature — **no paths or env vars to set**:
 
 ```toml
 gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", features = ["cuda"] }
 ```
 
-That builds the Go prover with `-tags cuda` and links libgnark_cuda + icicle. Point the build at them with `GNARK_CUDA_DIR` (the gnark-cuda checkout) and `ICICLE_DIR` (the icicle install); `CUDA_DIR` defaults to `/usr/local/cuda`:
+`build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source into the cargo `OUT_DIR`, links them, and wires up icicle's runtime backend automatically. It needs the **CUDA toolkit, CMake, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`). The first `--features cuda` build compiles icicle's kernels (~10 min); later builds are incremental.
 
 ```bash
-GNARK_CUDA_DIR=<gnark-cuda> ICICLE_DIR=<icicle-install> \
 cargo test -p gnark-plonk-verifier --features gnark-apk-prover/cuda -- --ignored --nocapture
 ```
 
-CI runs the CPU backend (the GPU prove needs a CUDA host).
+CI runs the CPU backend (the GPU build needs a CUDA host).
 
 ## Project Structure
 
