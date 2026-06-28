@@ -80,7 +80,7 @@ gnark-apk-proofs/
 
 | System | Constraint Type | Count     |
 |--------|-----------------|-----------|
-| PLONK  | SCS             | 7,097,960 |
+| PLONK  | SCS             | 7,097,608 |
 
 ### Off-chain (Go)
 
@@ -96,7 +96,7 @@ gnark-apk-proofs/
 
 | Operation                       | Gas     |
 |---------------------------------|---------|
-| Full verify (APK proof + BLS)   | 550,709 |
+| Full verify (APK proof + BLS)   | 550,924 |
 | hashToG1                        | 38,256  |
 
 | Metric            | Value                |
@@ -119,13 +119,11 @@ bytes32[3] memory h_m = apkProof.hashToG1(message);
 
 // Verify APK proof + BLS signature
 apkProof.verify(
-    PublicInputs({
-        publicKeysCommitment: commitment,
-        bitlist: bitlist,
-        apk: aggregatePublicKey    // seed added on-chain
-    }),
+    commitment,                    // publicKeysCommitment (Poseidon2 over the validator set)
+    bitlist,                       // uint256[5]
+    aggregatePublicKey,            // apk ∈ G1, bytes32[3] — seed added on-chain
     plonkProof,
-    h_m,                           // H(m) ∈ G1
+    h_m,                           // H(m) ∈ G1, bytes32[3]
     aggregateSignature,            // bytes32[3]
     aggregatePublicKeyG2           // bytes32[6]
 );
