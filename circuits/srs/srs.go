@@ -202,55 +202,78 @@ func writeSRS(path string, srs *kzg.SRS) error {
 // --- Download ---
 
 func downloadRange(label string, offset, length int) ([]byte, error) {
-	client := &http.Client{Timeout: 30 * time.Minute}
-	req, err := http.NewRequest("GET", CeremonyURL, nil)
-	if err != nil {
-		return nil, err
-	}
 	end := offset + length - 1
-	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", offset, end))
-
 	totalMB := float64(length) / 1024 / 1024
 	fmt.Printf("[srs]   [%s] Downloading %.1f MB (offset %d)...\n", label, totalMB, offset)
 	start := time.Now()
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %d", resp.StatusCode)
-	}
-
 	data := make([]byte, 0, length)
 	buf := make([]byte, 256*1024)
-	var downloaded int
 	lastLog := start
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			data = append(data, buf[:n]...)
-			downloaded += n
-			if now := time.Now(); now.Sub(lastLog) >= 2*time.Second {
-				pct := float64(downloaded) / float64(length) * 100
-				dlMB := float64(downloaded) / 1024 / 1024
-				elapsed := now.Sub(start).Seconds()
-				mbps := dlMB / elapsed
-				fmt.Printf("[srs]   [%s] %.1f / %.1f MB (%.0f%%) — %.1f MB/s\n", label, dlMB, totalMB, pct, mbps)
-				lastLog = now
+	// The Filecoin ceremony gateway (Caddy) 502s on large ranges but serves small
+	// ones fine, so fetch in chunks. Each chunk is retried as a unit (partial
+	// chunk discarded) to keep resume logic simple.
+	const chunkSize = 32 * 1024 * 1024
+	const maxChunkRetries = 50
+	for len(data) < length {
+		chunkStart := offset + len(data)
+		chunkLen := chunkSize
+		if chunkStart+chunkLen-1 > end {
+			chunkLen = end - chunkStart + 1
+		}
+		chunkEnd := chunkStart + chunkLen - 1
+		var chunk []byte
+		var ok bool
+		for attempt := 0; attempt < maxChunkRetries; attempt++ {
+			chunk = chunk[:0]
+			client := &http.Client{Timeout: 5 * time.Minute}
+			req, err := http.NewRequest("GET", CeremonyURL, nil)
+			if err != nil {
+				return nil, err
 			}
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", chunkStart, chunkEnd))
+			resp, err := client.Do(req)
+			if err != nil {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
+				resp.Body.Close()
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			readErrFlag := false
+			for {
+				n, readErr := resp.Body.Read(buf)
+				if n > 0 {
+					chunk = append(chunk, buf[:n]...)
+				}
+				if readErr == io.EOF {
+					break
+				}
+				if readErr != nil {
+					readErrFlag = true
+					break
+				}
+			}
+			resp.Body.Close()
+			if !readErrFlag && len(chunk) == chunkLen {
+				ok = true
+				break
+			}
+			time.Sleep(1 * time.Second)
 		}
-		if readErr == io.EOF {
-			break
+		if !ok {
+			return nil, fmt.Errorf("chunk [%d-%d] failed after retries", chunkStart, chunkEnd)
 		}
-		if readErr != nil {
-			return nil, fmt.Errorf("read failed: %w", readErr)
+		data = append(data, chunk...)
+		if now := time.Now(); now.Sub(lastLog) >= 3*time.Second {
+			fmt.Printf("[srs]   [%s] %.0f / %.0f MB (%.0f%%)\n", label, float64(len(data))/1024/1024, totalMB, float64(len(data))/float64(length)*100)
+			lastLog = now
 		}
 	}
 	if len(data) != length {
-		return nil, fmt.Errorf("expected %d bytes, got %d", length, len(data))
+		return nil, fmt.Errorf("expected %d bytes, got %d after retries", length, len(data))
 	}
 
 	elapsed := time.Since(start)

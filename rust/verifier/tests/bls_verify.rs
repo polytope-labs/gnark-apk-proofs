@@ -25,14 +25,10 @@ use revm::{
 };
 
 sol! {
-	struct ApkPublicInputs {
-		uint256 publicKeysCommitment;
-		uint256[5] bitlist;
-		bytes32[3] apk;
-	}
-
 	function verify(
-		ApkPublicInputs apkInputs,
+		uint256 publicKeysCommitment,
+		uint256[5] bitlist,
+		bytes32[3] apk,
 		bytes apkProof,
 		bytes32[3] message,
 		bytes32[3] signature,
@@ -298,7 +294,7 @@ fn test_full_verify() {
 		"off-chain BLS verification failed"
 	);
 
-	// ── 5. Build ApkPublicInputs struct ──
+	// ── 5. Build flattened public inputs ──
 	let raw_pi = apk_proof.public_inputs_calldata();
 	assert_eq!(raw_pi.len(), 18 * 32);
 
@@ -308,9 +304,6 @@ fn test_full_verify() {
 	}
 	let commitment = U256::from_be_slice(&raw_pi[5 * 32..6 * 32]);
 
-	let apk_inputs =
-		ApkPublicInputs { publicKeysCommitment: commitment, bitlist, apk: g1_to_bytes32x3(&apk1) };
-
 	// ── 6. Deploy and call combined verify() on revm ──
 	println!("Deploying contracts in revm...");
 	let mut evm = create_evm();
@@ -318,7 +311,9 @@ fn test_full_verify() {
 	let contract = deploy_contracts(&mut evm, &mut nonce);
 
 	let calldata = verifyCall {
-		apkInputs: apk_inputs,
+		publicKeysCommitment: commitment,
+		bitlist,
+		apk: g1_to_bytes32x3(&apk1),
 		apkProof: apk_proof.proof_calldata().to_vec().into(),
 		message: g1_to_bytes32x3(&h_m),
 		signature: g1_to_bytes32x3(&asig),
