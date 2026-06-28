@@ -6,6 +6,9 @@ edition = "2021"
 
 [features]
 test-utils = ["ark-std"]
+# CUDA-accelerated icicle GPU PLONK backend. build.rs builds open-icicle + gnark-cuda from
+# source (needs CUDA toolkit + CMake + git); no env vars. Default build stays CPU-only.
+cuda = ["gnark-apk-ffi/cuda"]
 
 [dependencies]
 gnark-apk-ffi = { path = "../ffi" }

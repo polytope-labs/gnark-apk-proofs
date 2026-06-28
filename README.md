@@ -16,6 +16,40 @@ Rogue key attacks are prevented by requiring Proof of Possession (PoP) at regist
 
 The on-chain verifier combines APK proof verification (PLONK) with BLS aggregate signature verification in a single call, using EIP-2537 precompiles for BLS12-381 curve operations. It also provides an on-chain `hashToG1` function compatible with [w3f/bls](https://github.com/w3f/bls).
 
+## Proving backends (CPU / GPU)
+
+The circuit (1024 validators, ~7.1M constraints) proves under either backend; both produce identical proofs verified by the same Solidity/Rust verifier.
+
+| Backend | Build | Hardware | Prove time |
+|---|---|---|---|
+| **CPU** (default) | `go build` / `cargo build` | any | minutes (RAM-heavy) |
+| **GPU** (CUDA) | `go build -tags cuda` / `cargo build --features cuda` | NVIDIA + CUDA | **~12.5s** (RTX 5090) |
+
+The GPU path is a device-resident PLONK prover built on a [gnark fork](https://github.com/polytope-labs/gnark) (`gpu-plonk-prover` branch) + [libgnark_cuda](https://github.com/polytope-labs/gnark-cuda) (icicle/CUDA). It keeps the proof's polynomials on the device across the whole pipeline and is gated entirely behind `-tags cuda` — the default build is unchanged CPU-only. Building it requires libgnark_cuda + icicle at build time:
+
+```bash
+cd circuits
+CGO_CFLAGS="-I<gnark-cuda>/include" \
+CGO_LDFLAGS="-L<gnark-cuda>/build -L<icicle-install>/lib -L/usr/local/cuda/lib64" \
+go test -tags cuda -run TestPlonkProveAndVerify -timeout 30m ./apk/
+```
+
+### GPU from the Rust prover
+
+The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature — **no env vars at build or run time**:
+
+```toml
+gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", features = ["cuda"] }
+```
+
+`build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source and links them **statically** into the binary. The result is self-contained: it runs with no `LD_LIBRARY_PATH` and no `ICICLE_BACKEND_INSTALL_DIR` — the CUDA backend is `--whole-archive`d in and registers at startup (no dlopen). The only non-system runtime dependency is the stock CUDA runtime (`libcudart`), already on any CUDA host's loader path (the CUDA runtime stays dynamic on purpose — static `cudart` breaks kernel launches). It needs the **CUDA toolkit, CMake, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`); the first `--features cuda` build compiles icicle's kernels (~10 min), later builds are incremental.
+
+```bash
+cargo test -p gnark-plonk-verifier --features gnark-apk-prover/cuda -- --ignored --nocapture
+```
+
+CI runs the CPU backend (the GPU build needs a CUDA host).
+
 ## Project Structure
 
 ```

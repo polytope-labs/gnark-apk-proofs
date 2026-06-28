@@ -68,22 +68,6 @@ type ApkProofCircuit struct {
 
 // Define defines the circuit constraints
 func (circuit *ApkProofCircuit) Define(api frontend.API) error {
-	curve, err := sw_emulated.New[emulated.BLS12381Fp, emulated.BLS12381Fr](api, sw_emulated.GetBLS12381Params())
-	if err != nil {
-		return err
-	}
-
-	// Verify the public key commitment: H(pk_0.X.Limbs || pk_0.Y.Limbs || pk_1.X.Limbs || ... )
-	hasher, err := poseidon2.New(api)
-	if err != nil {
-		return err
-	}
-	for i := range 1024 {
-		hasher.Write(circuit.PublicKeys[i].X.Limbs...)
-		hasher.Write(circuit.PublicKeys[i].Y.Limbs...)
-	}
-	api.AssertIsEqual(hasher.Sum(), circuit.PublicKeysCommitment)
-
 	// Decompose bitlist into individual bits
 	var bits []frontend.Variable
 	for i := range len(circuit.Bitlist) {
@@ -96,16 +80,32 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 		}
 	}
 
-	// Aggregate participating public keys: apk = ProtocolSeed + Σ b_i * pk_i
-	// Note: on-curve and subgroup checks are performed by validators at
-	// registration time (conditional NP relation / PoP assumption).
+	curve, err := sw_emulated.New[emulated.BLS12381Fp, emulated.BLS12381Fr](
+		api,
+		sw_emulated.GetBLS12381Params(),
+	)
+	if err != nil {
+		return err
+	}
+	hasher, err := poseidon2.New(api)
+	if err != nil {
+		return err
+	}
 	seed := sw_bls12381.NewG1Affine(ProtocolSeed())
 	apk := &seed
+
+	// Hash public keys and aggregate in a single pass.
+	// No in-circuit on-curve or subgroup checks are needed: these are performed
+	// at validator registration time (PoP assumption), and the Poseidon2
+	// commitment binds the prover to exactly those validated keys.
 	for i := range 1024 {
+		hasher.Write(circuit.PublicKeys[i].X.Limbs...)
+		hasher.Write(circuit.PublicKeys[i].Y.Limbs...)
+
 		temp := curve.AddUnified(apk, &circuit.PublicKeys[i])
 		apk = curve.Select(bits[i], temp, apk)
 	}
-
+	api.AssertIsEqual(hasher.Sum(), circuit.PublicKeysCommitment)
 	curve.AssertIsEqual(apk, &circuit.ExpectedApk)
 
 	return nil
