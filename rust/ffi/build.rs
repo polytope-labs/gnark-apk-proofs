@@ -105,6 +105,15 @@ fn main() {
 			"cargo:rustc-env=GNARK_APK_ICICLE_BACKEND={}",
 			g.icicle_lib.join("backend").display()
 		);
+		// libgnark_cuda + icicle are NEEDED dylibs of the final binary. A dependency's build
+		// script can't add an rpath to a downstream binary (cargo limitation), so surface the
+		// loader path the binary needs — export it, or add these dirs to your binary's rpath.
+		println!(
+			"cargo:warning=gnark-apk(cuda): run with LD_LIBRARY_PATH={}:{}:{}",
+			g.gnark_cuda_lib.display(),
+			g.icicle_lib.display(),
+			g.cuda_lib.display()
+		);
 	}
 
 	println!("cargo:rerun-if-changed={}", circuits_dir.join("ffi").display());

@@ -36,7 +36,7 @@ go test -tags cuda -run TestPlonkProveAndVerify -timeout 30m ./apk/
 
 ### GPU from the Rust prover
 
-The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature — **no paths or env vars to set**:
+The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature — **the build needs no paths or env vars**:
 
 ```toml
 gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", features = ["cuda"] }
@@ -44,7 +44,11 @@ gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", 
 
 `build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source into the cargo `OUT_DIR`, links them, and wires up icicle's runtime backend automatically. It needs the **CUDA toolkit, CMake, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`). The first `--features cuda` build compiles icicle's kernels (~10 min); later builds are incremental.
 
+At **runtime** the GPU dylibs (`libgnark_cuda` + icicle) must be on the binary's loader path — cargo can't add an rpath to a *downstream* binary from a dependency, so the build prints the `LD_LIBRARY_PATH` to export (or add those dirs to your binary's rpath). icicle's runtime backend is located automatically.
+
 ```bash
+# the cuda build prints: warning: gnark-apk(cuda): run with LD_LIBRARY_PATH=...
+LD_LIBRARY_PATH=<printed-paths> \
 cargo test -p gnark-plonk-verifier --features gnark-apk-prover/cuda -- --ignored --nocapture
 ```
 
