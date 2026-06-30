@@ -26,6 +26,15 @@ pub enum VerifierError {
 	#[error("point not on curve")]
 	PointNotOnCurve,
 
+	#[error("point not in the prime-order subgroup")]
+	PointNotInSubgroup,
+
+	#[error("invalid proof structure: {0}")]
+	InvalidProofStructure(String),
+
+	#[error("lagrange index {idx} out of range for domain size {size}")]
+	LagrangeIndexOutOfRange { idx: u64, size: u64 },
+
 	#[error("scalar out of range")]
 	ScalarOutOfRange,
 

@@ -21,3 +21,6 @@ alloy-primitives = "1"
 serde_json = "1"
 hex = "0.4"
 w3f-bls = "0.1.9"
+# w3f-bls exposes arkworks 0.4 types; this is the matching ark-serialize used to
+# convert them to our 0.5 types without unsound transmutes (audit finding 35).
+ark-serialize-04 = { package = "ark-serialize", version = "0.4" }

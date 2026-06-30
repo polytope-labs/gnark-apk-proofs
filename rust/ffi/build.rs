@@ -52,8 +52,14 @@ fn main() {
 	let gpu = cuda.then(|| build_gpu_deps(&out_dir));
 
 	// Compile the Go circuit/prover into a C static archive (with -tags cuda when GPU is on).
+	// `-trimpath` and `-buildvcs=false` make the archive reproducible by stripping absolute
+	// build paths and VCS stamping from the output (audit finding 43).
 	let mut build = Command::new("go");
-	build.arg("build").arg("-buildmode=c-archive");
+	build
+		.arg("build")
+		.arg("-trimpath")
+		.arg("-buildvcs=false")
+		.arg("-buildmode=c-archive");
 	if let Some(g) = &gpu {
 		build.arg("-tags").arg("cuda");
 		build.env("CGO_CFLAGS", format!("-I{}", g.include.display()));
@@ -70,9 +76,13 @@ fn main() {
 	println!("cargo:rustc-link-search=native={}", out_dir.display());
 	println!("cargo:rustc-link-lib=static={lib_name}");
 
-	// Go's c-archive depends on pthreads and the system resolver
-	println!("cargo:rustc-link-lib=dylib=resolv");
+	// Go's c-archive depends on pthreads and the system resolver. These are
+	// platform-specific: `resolv` is a separate library on Linux, but folded into
+	// libSystem on macOS, so guard it by target OS (audit finding 46).
 	println!("cargo:rustc-link-lib=dylib=pthread");
+	if cfg!(target_os = "linux") {
+		println!("cargo:rustc-link-lib=dylib=resolv");
+	}
 
 	// Link the GPU stack fully static so the binary is self-contained: only system libs end up
 	// as NEEDED, and it runs with no LD_LIBRARY_PATH / ICICLE_BACKEND_INSTALL_DIR.
@@ -116,6 +126,11 @@ fn main() {
 
 	println!("cargo:rerun-if-changed={}", circuits_dir.join("ffi").display());
 	println!("cargo:rerun-if-changed={}", circuits_dir.join("apk").display());
+	println!("cargo:rerun-if-changed={}", circuits_dir.join("srs").display());
+	// Track the Go module manifests so a dependency change forces a rebuild
+	// (audit finding 47).
+	println!("cargo:rerun-if-changed={}", circuits_dir.join("go.mod").display());
+	println!("cargo:rerun-if-changed={}", circuits_dir.join("go.sum").display());
 	println!("cargo:rerun-if-env-changed=GNARK_APK_CUDA");
 }
 

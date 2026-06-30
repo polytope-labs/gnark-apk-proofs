@@ -38,7 +38,6 @@ import (
 	"unsafe"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
-	"github.com/consensys/gnark-crypto/ecc/bls12-381/fp"
 	"github.com/consensys/gnark/frontend"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -196,6 +195,18 @@ func ApkProve(handle C.uint64_t, witnessData *C.uint8_t, witnessLen C.uint32_t, 
 	}
 	pubBytes = pubBytes[12:]
 
+	// Enforce the FFI output contract the Rust side relies on: non-empty buffers
+	// (finding 11). Under normal operation these are always populated; an empty
+	// buffer here signals a logic error upstream rather than a valid result.
+	if len(proofBytes) == 0 {
+		setError(result, "internal error: empty proof")
+		return -1
+	}
+	if len(pubBytes) == 0 {
+		setError(result, "internal error: empty public inputs")
+		return -1
+	}
+
 	copyToResult(result, proofBytes, pubBytes)
 	return 0
 }
@@ -217,12 +228,12 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.ApkProofCircuit, err
 		return nil, fmt.Errorf("witness too short: %d < %d", totalLen, minLen)
 	}
 
-	// Parse public keys
+	// Parse and validate public keys (on-curve + subgroup checks at the trust boundary).
 	points := make([]bls12381.G1Affine, numPubKeys)
 	var pubKeys [1024]sw_emulated.AffinePoint[emulated.BLS12381Fp]
 	offset := 0
 	for i := range numPubKeys {
-		pt, err := parseG1(buf[offset : offset+g1Size])
+		pt, err := apk.ParseG1(buf[offset : offset+g1Size])
 		if err != nil {
 			return nil, fmt.Errorf("invalid public key %d: %v", i, err)
 		}
@@ -231,16 +242,22 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.ApkProofCircuit, err
 		offset += g1Size
 	}
 
-	// Parse participation indices
+	// Parse participation count.
 	if offset+4 > totalLen {
 		return nil, fmt.Errorf("truncated at participation count")
 	}
 	numParticipants := int(beUint32(buf[offset : offset+4]))
-	offset += 4
 
-	if offset+numParticipants*2 > totalLen {
-		return nil, fmt.Errorf("truncated at participation indices")
+	// Reject out-of-bounds counts before reading indices, and require the buffer
+	// to be exactly the expected length — no trailing garbage (findings 10, 13).
+	if numParticipants > numPubKeys {
+		return nil, fmt.Errorf("participant count %d exceeds %d validators", numParticipants, numPubKeys)
 	}
+	expectedLen := pubKeysBytes + 4 + numParticipants*2
+	if totalLen != expectedLen {
+		return nil, fmt.Errorf("invalid witness length: expected %d, got %d", expectedLen, totalLen)
+	}
+	offset += 4
 
 	participantIndices := make([]int, numParticipants)
 	for i := range numParticipants {
@@ -248,15 +265,21 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.ApkProofCircuit, err
 		offset += 2
 	}
 
-	// Compute bitlist from indices
+	// Reject a malformed index list (out-of-range or duplicate) explicitly rather
+	// than silently filtering it (findings 5, 12). This is prover-side input
+	// hygiene — the bitlist and the aggregation set below are built from the same
+	// indices and already agree; this just turns silent caller mistakes into errors.
+	if err := apk.ValidateParticipationIndices(participantIndices, numPubKeys); err != nil {
+		return nil, err
+	}
+
+	// Compute bitlist from the validated indices.
 	bitlist := apk.CreateBitlistFromIndices(participantIndices)
 
 	// Compute expected APK: ProtocolSeed + Σ b_i * pk_i
 	participantSet := make(map[int]bool, len(participantIndices))
 	for _, idx := range participantIndices {
-		if idx >= 0 && idx < numPubKeys {
-			participantSet[idx] = true
-		}
+		participantSet[idx] = true
 	}
 	expectedApk := apk.ProtocolSeed()
 	for i := range numPubKeys {
@@ -269,21 +292,11 @@ func parseWitness(data *C.uint8_t, length C.uint32_t) (*apk.ApkProofCircuit, err
 	commitment := apk.NativePublicKeysCommitment(points)
 
 	return &apk.ApkProofCircuit{
-		PublicKeys:          pubKeys,
-		Bitlist:             bitlist,
+		PublicKeys:           pubKeys,
+		Bitlist:              bitlist,
 		PublicKeysCommitment: commitment,
-		ExpectedApk:         sw_bls12381.NewG1Affine(expectedApk),
+		ExpectedApk:          sw_bls12381.NewG1Affine(expectedApk),
 	}, nil
-}
-
-func parseG1(data []byte) (bls12381.G1Affine, error) {
-	var pt bls12381.G1Affine
-	var x, y fp.Element
-	x.SetBytes(data[0:48])
-	y.SetBytes(data[48:96])
-	pt.X = x
-	pt.Y = y
-	return pt, nil
 }
 
 func beUint32(b []byte) uint32 {

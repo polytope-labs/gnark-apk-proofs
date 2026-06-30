@@ -273,8 +273,15 @@ fn reduce_to_fr(hash: &[u8; 32]) -> Fr {
 	Fr::from_be_bytes_mod_order(hash)
 }
 
-/// Hash-to-field for BSB22 commitments, matching gnark's expand_msg_xmd approach.
-/// This is the `hash_fr` function from the Solidity verifier.
+/// Hash-to-field for BSB22 commitments, matching gnark's `hash_fr` in the
+/// generated Solidity verifier.
+///
+/// This is `expand_message_xmd` with SHA-256 per RFC 9380 §5.3.1
+/// (<https://www.rfc-editor.org/rfc/rfc9380.html>), specialised to the fixed
+/// parameters gnark uses: DST = "BSB22-Plonk", output length L = 48 bytes, and a
+/// single block expansion (b0, b1, b2). The 48 derived bytes are folded into an
+/// Fr as `b1·2^128 + b2[0..16] (mod r)`. The cross-implementation regression test
+/// `bsb22_matches_gnark` locks this against gnark's output.
 ///
 /// Input: a 96-byte G1 point (in Solidity encoding).
 /// Output: an Fr element.

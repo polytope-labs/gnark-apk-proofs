@@ -68,7 +68,17 @@ type ApkProofCircuit struct {
 
 // Define defines the circuit constraints
 func (circuit *ApkProofCircuit) Define(api frontend.API) error {
-	// Decompose bitlist into individual bits
+	// Decompose the bitlist into 1024 individual participation bits.
+	//
+	// Bitlist encoding (audit finding 2): the 1024-bit participation set is packed
+	// into 5 field-element limbs, little-endian within each limb:
+	//   - Bitlist[0..3]: 250 bits each  -> indices 0..999
+	//   - Bitlist[4]:    24 bits        -> indices 1000..1023
+	// Bit i of limb k maps to validator index (k*250 + i) for k<4, and (1000 + i)
+	// for k==4. api.ToBinary(x, n) constrains x < 2^n and enforces the canonical
+	// bit decomposition, so out-of-range limb values are rejected in-circuit.
+	// The Go/Rust witness builders MUST use this exact mapping
+	// (see apk.CreateBitlistFromIndices); it is the single canonical source.
 	var bits []frontend.Variable
 	for i := range len(circuit.Bitlist) {
 		if i == 4 {
@@ -95,9 +105,15 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	apk := &seed
 
 	// Hash public keys and aggregate in a single pass.
-	// No in-circuit on-curve or subgroup checks are needed: these are performed
-	// at validator registration time (PoP assumption), and the Poseidon2
-	// commitment binds the prover to exactly those validated keys.
+	//
+	// On-curve and prime-order subgroup validity of every public key are enforced
+	// outside the proving system, at the FFI trust boundary in apk.ParseG1 (audit
+	// findings 1, 3, 14), and independently in the Rust prover before serialization
+	// (finding 15). In-circuit subgroup checks over 1024 emulated BLS12-381 points
+	// are prohibitively expensive and are intentionally not performed here; the
+	// Poseidon2 commitment then binds the prover to exactly the validated key set.
+	// Proof of Possession at registration covers secret-key ownership only — it is
+	// a separate guarantee from the algebraic point validation done in ParseG1.
 	for i := range 1024 {
 		hasher.Write(circuit.PublicKeys[i].X.Limbs...)
 		hasher.Write(circuit.PublicKeys[i].Y.Limbs...)

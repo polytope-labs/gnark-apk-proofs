@@ -36,6 +36,18 @@ import {PlonkVerifier} from "./PlonkVerifier.sol";
  *      X.c0‖X.c1‖Y.c0‖Y.c1, 48 bytes each.
  *
  *      Requires Prague EVM (Pectra hardfork) for EIP-2537 BLS12-381 precompiles.
+ *
+ *      Security assumptions and trust boundaries:
+ *        - All elliptic-curve arithmetic (G1ADD, G1MSM, pairing, map-to-G1) is
+ *          delegated to the EIP-2537 precompiles, which are trusted to perform
+ *          on-curve and subgroup validation of their inputs per the EIP. This
+ *          contract therefore performs no separate point validation (finding 50).
+ *        - Verification is stateless and idempotent: it does not track consumed
+ *          proofs, so replay protection (nonce/uniqueness), if required, must be
+ *          enforced by the calling application (finding 53).
+ *        - hashToG1 and the BLS challenge derivation implement expand_message_xmd
+ *          (RFC 9380) with the w3f/bls cipher suite; see the per-function NatSpec
+ *          for the exact DST and parameters (findings 49, 52, 55).
  */
 contract ApkProof {
     PlonkVerifier public immutable _plonk;
