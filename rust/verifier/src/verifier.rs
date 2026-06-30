@@ -42,6 +42,31 @@ pub fn verify(
 		});
 	}
 
+	// Domain size must be a power of two — PLONK relies on it for the FFT/Lagrange
+	// basis. A non-power-of-two would silently corrupt Lagrange computations
+	// (audit finding 34).
+	if vk.size == 0 || !vk.size.is_power_of_two() {
+		return Err(VerifierError::InvalidVkFormat("domain size must be a power of 2"));
+	}
+
+	// The proof's custom-gate vectors must match the VK's expected count, and the
+	// VK's commitment-constraint indexes must line up with its custom gates
+	// (audit finding 27). Otherwise later MSM/folding loops would index past the
+	// end or fold the wrong number of terms.
+	if proof.qcp_evals.len() != vk.qcp.len() || proof.bsb22_commitments.len() != vk.qcp.len() {
+		return Err(VerifierError::InvalidProofStructure(format!(
+			"custom-gate count mismatch: qcp_evals={}, bsb22_commitments={}, vk.qcp={}",
+			proof.qcp_evals.len(),
+			proof.bsb22_commitments.len(),
+			vk.qcp.len(),
+		)));
+	}
+	if vk.commitment_constraint_indexes.len() != vk.qcp.len() {
+		return Err(VerifierError::InvalidVkFormat(
+			"commitment_constraint_indexes length must equal qcp length",
+		));
+	}
+
 	// ── Derive challenges (γ, β, α, ζ) ──────────────────────────────────
 	let mut challenges = Challenges::derive(proof, vk, public_inputs)?;
 
@@ -141,8 +166,14 @@ fn compute_pi_commit(
 		write_g1_solidity(&mut point_bytes, bsb_com);
 		let h_fr = transcript::hash_fr_bsb22(&point_bytes);
 
-		// Lagrange at index (nb_public_variables + commitment_constraint_index)
+		// Lagrange at index (nb_public_variables + commitment_constraint_index).
+		// Bound-check against the domain size (audit finding 30): an out-of-range
+		// index would select ω^idx outside the basis, wrapping around the
+		// multiplicative group and using the wrong Lagrange element.
 		let idx = vk.nb_public_variables + vk.commitment_constraint_indexes[i];
+		if idx >= vk.size {
+			return Err(VerifierError::LagrangeIndexOutOfRange { idx, size: vk.size });
+		}
 		let li = compute_ith_lagrange_at_z(
 			zeta,
 			zeta_power_n_minus_one,
@@ -478,32 +509,11 @@ fn derive_batch_random(
 
 	use sha2::Digest;
 	let hash = sha2::Sha256::digest(&preimage);
-	let mut hash_arr = [0u8; 32];
-	hash_arr.copy_from_slice(&hash);
 
-	// mod r
-	let mut limbs = [0u64; 4];
-	for i in 0..4 {
-		let start = i * 8;
-		let mut bytes = [0u8; 8];
-		bytes.copy_from_slice(&hash_arr[start..start + 8]);
-		limbs[3 - i] = u64::from_be_bytes(bytes);
-	}
-	// Reduce the 256-bit hash into Fr. The hash can be up to 2^256-1
-	// which may exceed r_mod multiple times, so use modular arithmetic.
-	use ark_ff::BigInteger;
-	let bigint = ark_ff::BigInteger256::new(limbs);
-	Ok(Fr::from_bigint(bigint).unwrap_or_else(|| {
-		// Value >= r_mod: compute val mod r_mod via repeated subtraction
-		// or more robustly via the Fp reduction path.
-		// Since 2^256 / r_mod < 4, at most 3 subtractions suffice.
-		let r_mod = Fr::MODULUS;
-		let mut val = bigint;
-		while val >= r_mod {
-			val.sub_with_borrow(&r_mod);
-		}
-		Fr::from_bigint(val).expect("value should be reduced mod r")
-	}))
+	// Reduce the 256-bit big-endian hash into Fr. `from_be_bytes_mod_order`
+	// performs the modular reduction correctly and infallibly, replacing the
+	// earlier repeated-subtraction fallback that could panic (audit finding 31).
+	Ok(Fr::from_be_bytes_mod_order(&hash))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -549,5 +559,88 @@ fn write_fq(out: &mut [u8], fq: &ark_bls12_381::Fq) {
 	let limbs: &[u64] = bigint.as_ref();
 	for (i, &limb) in limbs.iter().rev().enumerate() {
 		out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::verify;
+	use crate::{
+		error::VerifierError,
+		proof::{PlonkProof, VerifyingKey},
+	};
+	use ark_bls12_381::{Fr, G1Affine, G2Affine};
+	use ark_ec::AffineRepr;
+	use ark_ff::One;
+
+	/// Minimal VK shell for exercising the early structural checks in `verify`.
+	fn vk(size: u64, nb_public: u64, qcp_len: usize, cci: Vec<u64>) -> VerifyingKey {
+		let g1 = G1Affine::generator();
+		let g2 = G2Affine::generator();
+		VerifyingKey {
+			size,
+			size_inv: Fr::one(),
+			generator: Fr::one(),
+			nb_public_variables: nb_public,
+			coset_shift: Fr::one(),
+			s: [g1; 3],
+			ql: g1,
+			qr: g1,
+			qm: g1,
+			qo: g1,
+			qk: g1,
+			qcp: vec![g1; qcp_len],
+			commitment_constraint_indexes: cci,
+			kzg_g1: g1,
+			kzg_g2: [g2; 2],
+		}
+	}
+
+	fn proof(qcp_evals: usize, bsb22: usize) -> PlonkProof {
+		let g1 = G1Affine::generator();
+		PlonkProof {
+			lro: [g1; 3],
+			h: [g1; 3],
+			l_at_zeta: Fr::one(),
+			r_at_zeta: Fr::one(),
+			o_at_zeta: Fr::one(),
+			s1_at_zeta: Fr::one(),
+			s2_at_zeta: Fr::one(),
+			z: g1,
+			z_shifted_eval: Fr::one(),
+			w_zeta: g1,
+			w_zeta_omega: g1,
+			qcp_evals: vec![Fr::one(); qcp_evals],
+			bsb22_commitments: vec![g1; bsb22],
+		}
+	}
+
+	// Finding 34: domain size must be a power of two.
+	#[test]
+	fn rejects_non_power_of_two_domain() {
+		let err = verify(&proof(1, 1), &vk(3, 0, 1, vec![0]), &[]).unwrap_err();
+		assert!(matches!(err, VerifierError::InvalidVkFormat(_)));
+	}
+
+	// Finding 27: proof custom-gate vectors must match the VK.
+	#[test]
+	fn rejects_custom_gate_count_mismatch() {
+		let err = verify(&proof(0, 1), &vk(4, 0, 1, vec![0]), &[]).unwrap_err();
+		assert!(matches!(err, VerifierError::InvalidProofStructure(_)));
+	}
+
+	// Existing invariant: public input count must match the VK.
+	#[test]
+	fn rejects_public_input_count_mismatch() {
+		let err = verify(&proof(1, 1), &vk(4, 2, 1, vec![0]), &[Fr::one()]).unwrap_err();
+		assert!(matches!(err, VerifierError::InvalidPublicInputCount { .. }));
+	}
+
+	// Finding 30: Lagrange index (nb_public + cci) must be within the domain.
+	#[test]
+	fn rejects_out_of_range_lagrange_index() {
+		// size = 4, commitment_constraint_index = 4  ⇒  idx 4 ≥ size 4.
+		let err = verify(&proof(1, 1), &vk(4, 0, 1, vec![4]), &[]).unwrap_err();
+		assert!(matches!(err, VerifierError::LagrangeIndexOutOfRange { idx: 4, size: 4 }));
 	}
 }

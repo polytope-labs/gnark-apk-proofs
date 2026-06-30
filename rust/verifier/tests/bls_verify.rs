@@ -38,6 +38,26 @@ sol! {
 	function hashToG1(bytes message) external view returns (bytes32[3]);
 }
 
+// ─── arkworks 0.4 → 0.5 conversion ───────────────────────────────────────────
+
+/// Convert an arkworks 0.4 value (as exposed by w3f-bls) into the equivalent
+/// arkworks 0.5 value via canonical serialization (audit finding 35).
+///
+/// This replaces `core::mem::transmute`, which relied on the two crate versions
+/// having byte-identical memory layouts — an unchecked assumption that would
+/// silently corrupt data if it ever stopped holding. Going through the canonical
+/// (compressed) encoding is layout-independent and additionally validates that
+/// the decoded point is on-curve and in the correct subgroup.
+fn convert_04_to_05<A, B>(v04: &A) -> B
+where
+	A: ark_serialize_04::CanonicalSerialize,
+	B: ark_serialize::CanonicalDeserialize,
+{
+	let mut bytes = Vec::new();
+	v04.serialize_compressed(&mut bytes).expect("ark 0.4 serialization failed");
+	B::deserialize_compressed(&*bytes).expect("ark 0.5 deserialization failed")
+}
+
 // ─── Serialization helpers ───────────────────────────────────────────────────
 
 fn g1_to_bytes(point: &G1Affine) -> Vec<u8> {
@@ -207,11 +227,11 @@ fn test_full_verify() {
 	};
 
 	// Extract G1 public keys for APK circuit (sk * G1_generator).
-	// SecretKeyVT.0 is the raw scalar (ark 0.4 Fr) — transmute to ark 0.5.
+	// SecretKeyVT.0 is the raw scalar (ark 0.4 Fr) — convert to ark 0.5.
 	let g1_pks: Vec<G1Affine> = keypairs
 		.iter()
 		.map(|kp| {
-			let sk: ark_bls12_381::Fr = unsafe { core::mem::transmute(kp.secret.0) };
+			let sk: ark_bls12_381::Fr = convert_04_to_05(&kp.secret.0);
 			(G1Affine::generator().into_group() * sk).into_affine()
 		})
 		.collect();
@@ -221,7 +241,7 @@ fn test_full_verify() {
 		.iter()
 		.map(|kp| {
 			let affine: <TinyBLS381 as EngineBLS>::PublicKeyGroupAffine = kp.public.0.into();
-			unsafe { core::mem::transmute::<_, G2Affine>(affine) }
+			convert_04_to_05::<_, G2Affine>(&affine)
 		})
 		.collect();
 
@@ -260,8 +280,9 @@ fn test_full_verify() {
 		.iter()
 		.map(|&i| {
 			let sig = keypairs[i as usize].sign(&message);
-			// Transmute ark 0.4 G1Projective → ark 0.5
-			unsafe { core::mem::transmute::<_, G1Projective>(sig.0) }
+			// Convert ark 0.4 signature point → ark 0.5 (via its affine encoding).
+			let affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = sig.0.into();
+			convert_04_to_05::<_, G1Affine>(&affine).into_group()
 		})
 		.collect();
 
@@ -269,11 +290,8 @@ fn test_full_verify() {
 
 	// Hash message to G1 for the on-chain call
 	let h_m_proj = message.hash_to_signature_curve::<TinyBLS381>();
-	let h_m: G1Affine = unsafe {
-		core::mem::transmute::<_, G1Affine>(<TinyBLS381 as EngineBLS>::SignatureGroupAffine::from(
-			h_m_proj,
-		))
-	};
+	let h_m_affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = h_m_proj.into();
+	let h_m: G1Affine = convert_04_to_05(&h_m_affine);
 
 	let apk1: G1Affine = participation
 		.iter()
@@ -351,12 +369,11 @@ fn test_hash_to_g1() {
 	let message = Message::new_assuming_pop(context, raw_msg);
 	let expected_proj = message.hash_to_signature_curve::<TinyBLS381>();
 
-	// Convert w3f/bls output (ark 0.4 G1Affine) to bytes32[3] for comparison.
-	// Both ark 0.4 and 0.5 use identical internal Fp representation (6 x u64 limbs),
-	// so we transmute to our ark 0.5 G1Affine which has the same memory layout.
+	// Convert w3f/bls output (ark 0.4 G1Affine) to bytes32[3] for comparison via
+	// canonical serialization rather than a layout-dependent transmute (finding 35).
 	let expected_bytes = {
 		let affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = expected_proj.into();
-		let affine_v5: G1Affine = unsafe { core::mem::transmute(affine) };
+		let affine_v5: G1Affine = convert_04_to_05(&affine);
 		g1_to_bytes32x3(&affine_v5)
 	};
 

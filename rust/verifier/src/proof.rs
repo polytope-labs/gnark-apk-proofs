@@ -271,8 +271,20 @@ fn read_g1_solidity(data: &[u8], offset: &mut usize) -> Result<G1Affine, Verifie
 	let y = fq_from_be_bytes(&chunk[48..96])?;
 
 	let point = G1Affine::new_unchecked(x, y);
+	validate_g1(point)
+}
+
+/// Validate a deserialized (non-infinity) G1 point: it must satisfy the curve
+/// equation and lie in the prime-order subgroup (audit findings 25, 26).
+///
+/// On-curve alone is insufficient for pairing-based soundness: BLS12-381 G1 has a
+/// cofactor, so an attacker could otherwise supply a low-order point.
+fn validate_g1(point: G1Affine) -> Result<G1Affine, VerifierError> {
 	if !point.is_on_curve() {
 		return Err(VerifierError::PointNotOnCurve);
+	}
+	if !point.is_in_correct_subgroup_assuming_on_curve() {
+		return Err(VerifierError::PointNotInSubgroup);
 	}
 	Ok(point)
 }
@@ -314,7 +326,9 @@ fn read_g1_gnark(data: &[u8], offset: &mut usize) -> Result<G1Affine, VerifierEr
 	let neg_y = -y;
 	let y = if greatest == (y > neg_y) { y } else { neg_y };
 
-	Ok(G1Affine::new_unchecked(x, y))
+	// Validate the reconstructed point rather than trusting sqrt/new_unchecked
+	// (audit findings 25, 26).
+	validate_g1(G1Affine::new_unchecked(x, y))
 }
 
 /// Read a G2 point from gnark's binary format — compressed (96 bytes).
@@ -328,7 +342,10 @@ fn read_g2_gnark(data: &[u8], offset: &mut usize) -> Result<G2Affine, VerifierEr
 		return Ok(G2Affine::zero());
 	}
 
-	// G2 X coordinate is Fq2 = c0 + c1*u, stored as c1(48 bytes) || c0(48 bytes) in gnark
+	// G2 X coordinate is Fq2 = c0 + c1*u, stored as c1(48 bytes) || c0(48 bytes) in gnark.
+	// This c1||c0 ordering is gnark-crypto's Fq2 marshalling convention and is the
+	// reverse of the more common c0||c1 layout (audit finding 33). The KZG G2 points
+	// originate from the trusted SRS, but we still validate them defensively below.
 	let mut c1_bytes = [0u8; 48];
 	c1_bytes.copy_from_slice(&chunk[..48]);
 	c1_bytes[0] &= 0x1F; // clear flag bits
@@ -347,7 +364,16 @@ fn read_g2_gnark(data: &[u8], offset: &mut usize) -> Result<G2Affine, VerifierEr
 	let neg_y = -y;
 	let y = if greatest == (y > neg_y) { y } else { neg_y };
 
-	Ok(G2Affine::new_unchecked(x, y))
+	// Validate the reconstructed point on-curve and in the prime-order subgroup
+	// (audit findings 25, 26).
+	let point = G2Affine::new_unchecked(x, y);
+	if !point.is_on_curve() {
+		return Err(VerifierError::PointNotOnCurve);
+	}
+	if !point.is_in_correct_subgroup_assuming_on_curve() {
+		return Err(VerifierError::PointNotInSubgroup);
+	}
+	Ok(point)
 }
 
 /// Read a 32-byte big-endian Fr scalar.
@@ -385,12 +411,15 @@ fn fq_from_be_bytes(bytes: &[u8]) -> Result<ark_bls12_381::Fq, VerifierError> {
 	ark_bls12_381::Fq::from_bigint(BigInteger384::new(limbs)).ok_or(VerifierError::ScalarOutOfRange)
 }
 
+/// Read a big-endian u64. gnark's `WriteTo` binary format encodes all integer
+/// header fields (size, nb_public_variables, slice lengths) as big-endian
+/// (audit finding 28: this is fixed, not ambiguous).
 fn read_u64(data: &[u8], offset: &mut usize) -> Result<u64, VerifierError> {
 	ensure_bytes(data, *offset, 8)?;
 	let mut buf = [0u8; 8];
 	buf.copy_from_slice(&data[*offset..*offset + 8]);
 	*offset += 8;
-	Ok(u64::from_big_endian_or_le(&buf))
+	Ok(u64::from_be_bytes(buf))
 }
 
 fn read_u32(data: &[u8], offset: &mut usize) -> Result<u32, VerifierError> {
@@ -409,13 +438,89 @@ fn ensure_bytes(data: &[u8], offset: usize, need: usize) -> Result<(), VerifierE
 	}
 }
 
-/// gnark's binary encoder uses big-endian for uint64.
-trait FromBigEndianOrLe {
-	fn from_big_endian_or_le(bytes: &[u8; 8]) -> Self;
-}
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use ark_bls12_381::Fq;
+	use ark_ec::AffineRepr;
+	use ark_ff::{Field, One, PrimeField};
 
-impl FromBigEndianOrLe for u64 {
-	fn from_big_endian_or_le(bytes: &[u8; 8]) -> Self {
-		u64::from_be_bytes(*bytes)
+	/// Serialize a G1 point into the 96-byte MarshalSolidity format (X || Y, BE).
+	fn solidity_bytes(pt: &G1Affine) -> [u8; 96] {
+		let mut out = [0u8; 96];
+		if pt.is_zero() {
+			return out;
+		}
+		let (x, y) = pt.xy().unwrap();
+		write_fq_be(&mut out[..48], &x);
+		write_fq_be(&mut out[48..], &y);
+		out
+	}
+
+	fn write_fq_be(out: &mut [u8], fq: &Fq) {
+		let bigint = (*fq).into_bigint();
+		let limbs: &[u64] = bigint.as_ref();
+		for (i, &limb) in limbs.iter().rev().enumerate() {
+			out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
+		}
+	}
+
+	/// An on-curve point that lies outside the prime-order subgroup.
+	fn on_curve_not_in_subgroup() -> G1Affine {
+		let mut x = Fq::from(2u64);
+		let four = Fq::from(4u64);
+		for _ in 0..1000 {
+			let rhs = x * x * x + four;
+			if let Some(y) = rhs.sqrt() {
+				let pt = G1Affine::new_unchecked(x, y);
+				if pt.is_on_curve() && !pt.is_in_correct_subgroup_assuming_on_curve() {
+					return pt;
+				}
+			}
+			x += Fq::one();
+		}
+		panic!("could not construct on-curve non-subgroup point");
+	}
+
+	#[test]
+	fn read_g1_solidity_accepts_generator() {
+		let g = G1Affine::generator();
+		let bytes = solidity_bytes(&g);
+		let mut offset = 0;
+		assert_eq!(read_g1_solidity(&bytes, &mut offset).unwrap(), g);
+		assert_eq!(offset, G1_SIZE);
+	}
+
+	#[test]
+	fn read_g1_solidity_accepts_infinity() {
+		let bytes = [0u8; 96];
+		let mut offset = 0;
+		assert!(read_g1_solidity(&bytes, &mut offset).unwrap().is_zero());
+	}
+
+	#[test]
+	fn read_g1_solidity_rejects_off_curve() {
+		// Generator with Y perturbed so y² ≠ x³ + 4.
+		let g = G1Affine::generator();
+		let (x, y) = g.xy().unwrap();
+		let bad = G1Affine::new_unchecked(x, y + Fq::one());
+		let bytes = solidity_bytes(&bad);
+		let mut offset = 0;
+		assert!(matches!(
+			read_g1_solidity(&bytes, &mut offset),
+			Err(VerifierError::PointNotOnCurve)
+		));
+	}
+
+	#[test]
+	fn read_g1_solidity_rejects_non_subgroup() {
+		let pt = on_curve_not_in_subgroup();
+		assert!(pt.is_on_curve());
+		let bytes = solidity_bytes(&pt);
+		let mut offset = 0;
+		assert!(matches!(
+			read_g1_solidity(&bytes, &mut offset),
+			Err(VerifierError::PointNotInSubgroup)
+		));
 	}
 }

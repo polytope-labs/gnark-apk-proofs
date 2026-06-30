@@ -49,6 +49,21 @@ pub enum ApkProverError {
 	#[error("participant index {0} out of range (0..1023)")]
 	InvalidParticipantIndex(u16),
 
+	#[error("duplicate participant index {0}")]
+	DuplicateParticipant(u16),
+
+	#[error("public key {0} is not on the BLS12-381 G1 curve")]
+	PointNotOnCurve(usize),
+
+	#[error("public key {0} is not in the prime-order G1 subgroup")]
+	PointNotInSubgroup(usize),
+
+	#[error("malformed public inputs returned by prover: {0}")]
+	InvalidPublicInputs(String),
+
+	#[error("FFI returned a null or empty {0} buffer")]
+	InvalidFfiBuffer(&'static str),
+
 	#[error("proving failed: {0}")]
 	ProvingFailed(String),
 
@@ -173,16 +188,7 @@ impl<'a> ProofBuilder<'a> {
 		let participation =
 			self.participation.ok_or(ApkProverError::MissingField("participation"))?;
 
-		let num_keys = public_keys.len();
-		if num_keys > NUM_VALIDATORS {
-			return Err(ApkProverError::InvalidPublicKeyCount(num_keys));
-		}
-
-		for &idx in &participation {
-			if idx as usize >= num_keys {
-				return Err(ApkProverError::InvalidParticipantIndex(idx));
-			}
-		}
+		validate_proof_inputs(&public_keys, &participation)?;
 
 		// Pad to 1024 with identity points for unused slots.
 		public_keys.resize(NUM_VALIDATORS, G1Affine::identity());
@@ -206,6 +212,18 @@ impl<'a> ProofBuilder<'a> {
 			return Err(ApkProverError::ProvingFailed(msg));
 		}
 
+		// Validate the FFI output buffers before dereferencing the raw pointers
+		// (audit findings 18, 42): a null pointer or zero length would otherwise be
+		// undefined behaviour in `from_raw_parts`.
+		if result.proof_data.is_null() || result.proof_len == 0 {
+			unsafe { ApkFreeResult(&mut result) };
+			return Err(ApkProverError::InvalidFfiBuffer("proof"));
+		}
+		if result.public_inputs_data.is_null() || result.public_inputs_len == 0 {
+			unsafe { ApkFreeResult(&mut result) };
+			return Err(ApkProverError::InvalidFfiBuffer("public inputs"));
+		}
+
 		let proof_bytes = unsafe {
 			std::slice::from_raw_parts(result.proof_data, result.proof_len as usize).to_vec()
 		};
@@ -220,7 +238,7 @@ impl<'a> ProofBuilder<'a> {
 		let vk = self.ctx.verifying_key()?;
 		let proof =
 			gnark_plonk_verifier::PlonkProof::try_from((proof_bytes.as_slice(), vk.qcp.len()))?;
-		let public_inputs = parse_public_inputs(&public_inputs_bytes);
+		let public_inputs = parse_public_inputs(&public_inputs_bytes)?;
 
 		Ok(ApkProof {
 			proof,
@@ -231,12 +249,65 @@ impl<'a> ProofBuilder<'a> {
 	}
 }
 
+/// Validate proof inputs before they enter the witness.
+///
+/// * Every non-identity public key must be on the BLS12-381 G1 curve and in the prime-order
+///   subgroup (audit finding 15). Proof of Possession at registration proves secret-key ownership
+///   but not algebraic validity, so these checks are enforced here independently of the Go FFI
+///   boundary. The identity point is allowed only as padding.
+/// * Participation indices must be in range and unique (audit findings 5, 16). This is fail-loud
+///   input hygiene, not a soundness control: the key set is committed and the bitlist/ExpectedApk
+///   are public, and the bitlist/aggregation are idempotent so duplicates cannot double-count. It
+///   just rejects caller mistakes instead of silently building a proof for a different set.
+fn validate_proof_inputs(
+	public_keys: &[G1Affine],
+	participation: &[u16],
+) -> Result<(), ApkProverError> {
+	let num_keys = public_keys.len();
+	if num_keys > NUM_VALIDATORS {
+		return Err(ApkProverError::InvalidPublicKeyCount(num_keys));
+	}
+
+	for (i, key) in public_keys.iter().enumerate() {
+		if key.is_zero() {
+			continue;
+		}
+		if !key.is_on_curve() {
+			return Err(ApkProverError::PointNotOnCurve(i));
+		}
+		if !key.is_in_correct_subgroup_assuming_on_curve() {
+			return Err(ApkProverError::PointNotInSubgroup(i));
+		}
+	}
+
+	let mut seen = std::collections::HashSet::with_capacity(participation.len());
+	for &idx in participation {
+		if idx as usize >= num_keys {
+			return Err(ApkProverError::InvalidParticipantIndex(idx));
+		}
+		if !seen.insert(idx) {
+			return Err(ApkProverError::DuplicateParticipant(idx));
+		}
+	}
+
+	Ok(())
+}
+
 /// Parse public inputs from gnark's binary witness format (header stripped).
 /// Each public input is a 32-byte big-endian Fr element.
-fn parse_public_inputs(data: &[u8]) -> Vec<gnark_plonk_verifier::Fr> {
+///
+/// Returns a structured error instead of panicking on malformed input (audit
+/// findings 19, 20): a non-multiple-of-32 length or an out-of-range scalar
+/// indicates corruption rather than a recoverable result.
+fn parse_public_inputs(data: &[u8]) -> Result<Vec<gnark_plonk_verifier::Fr>, ApkProverError> {
 	use ark_ff::BigInteger256;
 
-	assert_eq!(data.len() % 32, 0);
+	if !data.len().is_multiple_of(32) {
+		return Err(ApkProverError::InvalidPublicInputs(format!(
+			"length {} is not a multiple of 32",
+			data.len()
+		)));
+	}
 	data.chunks(32)
 		.map(|chunk| {
 			let mut limbs = [0u64; 4];
@@ -247,7 +318,7 @@ fn parse_public_inputs(data: &[u8]) -> Vec<gnark_plonk_verifier::Fr> {
 				limbs[3 - i] = u64::from_be_bytes(bytes);
 			}
 			gnark_plonk_verifier::Fr::from_bigint(BigInteger256::new(limbs))
-				.expect("public input out of range")
+				.ok_or_else(|| ApkProverError::InvalidPublicInputs("scalar out of range".into()))
 		})
 		.collect()
 }
@@ -274,6 +345,11 @@ fn serialize_witness(keys: &[G1Affine], participation: &[u16]) -> Vec<u8> {
 		buf.extend_from_slice(&idx.to_be_bytes());
 	}
 
+	// The serialized witness must match the exact size the Go FFI expects
+	// (audit finding 17); a mismatch indicates a serialization bug.
+	debug_assert_eq!(keys.len(), NUM_VALIDATORS);
+	debug_assert_eq!(buf.len(), total);
+
 	buf
 }
 
@@ -297,5 +373,114 @@ fn fq_to_be_bytes(fq: &ark_bls12_381::Fq, buf: &mut Vec<u8>) {
 	// 6 limbs x 8 bytes = 48 bytes, most significant limb first.
 	for &limb in limbs.iter().rev() {
 		buf.extend_from_slice(&limb.to_be_bytes());
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use ark_bls12_381::Fq;
+	use ark_ec::AffineRepr;
+	use ark_ff::{Field, One};
+
+	/// An on-curve point outside the prime-order G1 subgroup.
+	fn on_curve_not_in_subgroup() -> G1Affine {
+		let mut x = Fq::from(2u64);
+		let four = Fq::from(4u64);
+		for _ in 0..1000 {
+			let rhs = x * x * x + four;
+			if let Some(y) = rhs.sqrt() {
+				let pt = G1Affine::new_unchecked(x, y);
+				if pt.is_on_curve() && !pt.is_in_correct_subgroup_assuming_on_curve() {
+					return pt;
+				}
+			}
+			x += Fq::one();
+		}
+		panic!("could not construct on-curve non-subgroup point");
+	}
+
+	#[test]
+	fn validate_accepts_valid_keys_and_indices() {
+		let keys = vec![G1Affine::generator(); 5];
+		assert!(validate_proof_inputs(&keys, &[0, 2, 4]).is_ok());
+	}
+
+	#[test]
+	fn validate_allows_identity_padding() {
+		let keys = vec![G1Affine::identity(), G1Affine::generator()];
+		assert!(validate_proof_inputs(&keys, &[1]).is_ok());
+	}
+
+	#[test]
+	fn validate_rejects_off_curve_key() {
+		let g = G1Affine::generator();
+		let (x, y) = g.xy().unwrap();
+		let bad = G1Affine::new_unchecked(x, y + Fq::one());
+		assert!(matches!(
+			validate_proof_inputs(&[bad], &[]),
+			Err(ApkProverError::PointNotOnCurve(0))
+		));
+	}
+
+	#[test]
+	fn validate_rejects_non_subgroup_key() {
+		let pt = on_curve_not_in_subgroup();
+		assert!(matches!(
+			validate_proof_inputs(&[pt], &[]),
+			Err(ApkProverError::PointNotInSubgroup(0))
+		));
+	}
+
+	#[test]
+	fn validate_rejects_duplicate_indices() {
+		let keys = vec![G1Affine::generator(); 3];
+		assert!(matches!(
+			validate_proof_inputs(&keys, &[1, 1]),
+			Err(ApkProverError::DuplicateParticipant(1))
+		));
+	}
+
+	#[test]
+	fn validate_rejects_out_of_range_index() {
+		let keys = vec![G1Affine::generator(); 3];
+		assert!(matches!(
+			validate_proof_inputs(&keys, &[3]),
+			Err(ApkProverError::InvalidParticipantIndex(3))
+		));
+	}
+
+	#[test]
+	fn validate_rejects_too_many_keys() {
+		let keys = vec![G1Affine::generator(); NUM_VALIDATORS + 1];
+		assert!(matches!(
+			validate_proof_inputs(&keys, &[]),
+			Err(ApkProverError::InvalidPublicKeyCount(_))
+		));
+	}
+
+	#[test]
+	fn parse_public_inputs_roundtrips_one() {
+		let mut bytes = vec![0u8; 32];
+		bytes[31] = 1;
+		let out = parse_public_inputs(&bytes).unwrap();
+		assert_eq!(out, vec![gnark_plonk_verifier::Fr::one()]);
+	}
+
+	#[test]
+	fn parse_public_inputs_rejects_bad_length() {
+		assert!(matches!(
+			parse_public_inputs(&[0u8; 31]),
+			Err(ApkProverError::InvalidPublicInputs(_))
+		));
+	}
+
+	#[test]
+	fn parse_public_inputs_rejects_out_of_range_scalar() {
+		// 32 bytes of 0xFF is larger than the Fr modulus.
+		assert!(matches!(
+			parse_public_inputs(&[0xFFu8; 32]),
+			Err(ApkProverError::InvalidPublicInputs(_))
+		));
 	}
 }
