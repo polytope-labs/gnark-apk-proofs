@@ -21,3 +21,6 @@ thiserror = "2"
 
 [dev-dependencies]
 ark-std = "0.5"
+# For the prove_from_json example, which bridges live chain data into a proof.
+hex = "0.4"
+serde_json = "1"

@@ -193,13 +193,18 @@ fn call(
 	result
 }
 
-fn deploy_contracts(evm: &mut Evm, nonce: &mut u64) -> alloy_primitives::Address {
+/// `use_pop` selects the cipher suite the contract hashes with: the proof of possession suite that
+/// `w3f_bls::Message::new_assuming_pop` signs under, or the basic one `Message::new` uses.
+fn deploy_contracts(evm: &mut Evm, nonce: &mut u64, use_pop: bool) -> alloy_primitives::Address {
 	let plonk_verifier = deploy(evm, nonce, Bytes::from(load_contract_bytecode("PlonkVerifier")));
 
 	let mut deploy_data = load_contract_bytecode("ApkProof");
 	let mut constructor_arg = [0u8; 32];
 	constructor_arg[12..32].copy_from_slice(plonk_verifier.as_slice());
 	deploy_data.extend_from_slice(&constructor_arg);
+	let mut suite_arg = [0u8; 32];
+	suite_arg[31] = use_pop as u8;
+	deploy_data.extend_from_slice(&suite_arg);
 
 	deploy(evm, nonce, Bytes::from(deploy_data))
 }
@@ -326,7 +331,7 @@ fn test_full_verify() {
 	println!("Deploying contracts in revm...");
 	let mut evm = create_evm();
 	let mut nonce = 0u64;
-	let contract = deploy_contracts(&mut evm, &mut nonce);
+	let contract = deploy_contracts(&mut evm, &mut nonce, true);
 
 	let calldata = verifyCall {
 		publicKeysCommitment: commitment,
@@ -383,7 +388,7 @@ fn test_hash_to_g1() {
 	// Deploy contract and call hashToG1
 	let mut evm = create_evm();
 	let mut nonce = 0u64;
-	let contract = deploy_contracts(&mut evm, &mut nonce);
+	let contract = deploy_contracts(&mut evm, &mut nonce, true);
 
 	let calldata = hashToG1Call { message: msg_input.into() }.abi_encode();
 
@@ -400,4 +405,55 @@ fn test_hash_to_g1() {
 		},
 		other => panic!("hashToG1 failed: {:?}", other),
 	}
+}
+
+/// The same check for the basic scheme.
+///
+/// `Message::new` selects the `..._NUL_` cipher suite where `Message::new_assuming_pop` selects
+/// `..._POP_`. The suite is part of the signed preimage, so a contract built for one scheme lands
+/// on a different curve point for the other, and the pairing fails with nothing to explain why.
+/// Deploying with `use_pop = false` is what lets a basic scheme signature verify here.
+///
+///   cargo test -p gnark-plonk-verifier --test bls_verify -- test_hash_to_g1_basic_scheme --nocapture
+#[test]
+fn test_hash_to_g1_basic_scheme() {
+	use w3f_bls::{EngineBLS, Message, TinyBLS381};
+
+	let context = b"";
+	let raw_msg = b"hello world";
+
+	let message = Message::new(context, raw_msg);
+	let expected_proj = message.hash_to_signature_curve::<TinyBLS381>();
+	let expected_bytes = {
+		let affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = expected_proj.into();
+		let affine_v5: G1Affine = convert_04_to_05(&affine);
+		g1_to_bytes32x3(&affine_v5)
+	};
+
+	let msg_input = [context.as_slice(), raw_msg.as_slice()].concat();
+
+	let mut evm = create_evm();
+	let mut nonce = 0u64;
+	let basic = deploy_contracts(&mut evm, &mut nonce, false);
+	let pop = deploy_contracts(&mut evm, &mut nonce, true);
+
+	let calldata = hashToG1Call { message: msg_input.into() }.abi_encode();
+
+	let basic_out = match call(&mut evm, &mut nonce, basic, Bytes::from(calldata.clone())) {
+		ExecutionResult::Success { output: Output::Call(out), .. } =>
+			<hashToG1Call as SolCall>::abi_decode_returns(&out).unwrap(),
+		other => panic!("basic-scheme hashToG1 failed: {:?}", other),
+	};
+	assert_eq!(basic_out, expected_bytes, "basic scheme output mismatch vs w3f/bls Message::new");
+
+	// And the PoP deployment must disagree, otherwise the suite is not actually reaching the hash
+	// and this test would pass for the wrong reason.
+	let pop_out = match call(&mut evm, &mut nonce, pop, Bytes::from(calldata)) {
+		ExecutionResult::Success { output: Output::Call(out), .. } =>
+			<hashToG1Call as SolCall>::abi_decode_returns(&out).unwrap(),
+		other => panic!("pop-scheme hashToG1 failed: {:?}", other),
+	};
+	assert_ne!(pop_out, expected_bytes, "PoP suite unexpectedly matched the basic-scheme vector");
+
+	println!("hashToG1 PASSED for the basic scheme, and the PoP deployment differs as expected");
 }

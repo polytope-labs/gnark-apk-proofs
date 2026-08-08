@@ -106,12 +106,25 @@ contract ApkProof {
         69304817850384178235384652711014277219752988873539414788182467642510429663469;
 
     /**
-     * w3f/bls cipher suite prefix for message signing (assuming PoP):
-     * "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_" (43 bytes, split 32+11)
+     * w3f/bls cipher suite prefix for message signing, 43 bytes split 32+11. The first 32 bytes
+     * are common to both schemes; only the trailing tag differs:
+     *
+     *   "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"  proof of possession
+     *   "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_"  basic
+     *
+     * The suite is part of the signed preimage, so a verifier has to use the same one the signer
+     * did. Signing with the basic scheme and verifying with PoP yields a well formed but different
+     * point, and the pairing simply returns false with nothing to explain why. `w3f_bls` exposes
+     * both, `Message::new` for basic and `Message::new_assuming_pop` for PoP, so the choice is
+     * fixed at deployment rather than hardcoded here.
      */
     uint256 private constant CIPHER_SUITE_FIRST_32 =
         0x424c535f5349475f424c53313233383147315f584d443a5348412d3235365f53;
-    uint256 private constant CIPHER_SUITE_LAST_11 = 0x5357555f524f5f504f505f;
+    uint256 private constant CIPHER_SUITE_LAST_11_POP = 0x5357555f524f5f504f505f;
+    uint256 private constant CIPHER_SUITE_LAST_11_NUL = 0x5357555f524f5f4e554c5f;
+
+    /// Trailing 11 bytes of the cipher suite, selected at construction.
+    uint256 private immutable CIPHER_SUITE_LAST_11;
 
     /// BLS12-381 base field modulus p, split for mstore (32 + 16 bytes).
     /// p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
@@ -119,8 +132,14 @@ contract ApkProof {
         0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f624;
     uint256 private constant BLS_P_LAST_16 = 0x1eabfffeb153ffffb9feffffffffaaab;
 
-    constructor(address _verifier) {
+    /**
+     * @param _verifier The PLONK verifier for the APK circuit.
+     * @param usePopSuite True to hash with the proof-of-possession suite, false for the basic
+     *        scheme. Must match whatever the signers use, see the note on the suite constants.
+     */
+    constructor(address _verifier, bool usePopSuite) {
         _plonk = PlonkVerifier(_verifier);
+        CIPHER_SUITE_LAST_11 = usePopSuite ? CIPHER_SUITE_LAST_11_POP : CIPHER_SUITE_LAST_11_NUL;
     }
 
     /**
@@ -164,6 +183,8 @@ contract ApkProof {
      * @return result Uncompressed G1 point as bytes32[3] (X ‖ Y, 96 bytes).
      */
     function hashToG1(bytes memory message) public view returns (bytes32[3] memory result) {
+        // Immutables are not readable from assembly, so bind it first.
+        uint256 suiteTail = CIPHER_SUITE_LAST_11;
         assembly {
             let ptr := mload(0x40)
             let sha2 := 0x02
@@ -179,7 +200,7 @@ contract ApkProof {
             mstore(ptr, 0)                                           // Z_pad[0..31]
             mstore(add(ptr, 0x20), 0)                                // Z_pad[32..63]
             mstore(add(ptr, 0x40), CIPHER_SUITE_FIRST_32)            // cipher[0..31]
-            mstore(add(ptr, 0x60), shl(168, CIPHER_SUITE_LAST_11))   // cipher[32..42]
+            mstore(add(ptr, 0x60), shl(168, suiteTail))             // cipher[32..42]
             mcopy(add(ptr, 0x6B), add(message, 0x20), msgLen)        // message
             let pos := add(add(ptr, 0x6B), msgLen)
             mstore8(pos, 0x00)                                       // I2OSP(128,2) high
