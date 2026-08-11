@@ -29,11 +29,11 @@
 //! 64-bit limbs — matching gnark's emulated `BLS12381Fp` limbs — and each limb is
 //! absorbed as one `Fr` element, in the order `X[0..6]` then `Y[0..6]` per point.
 
+use alloc::{boxed::Box, vec::Vec};
 use ark_bls12_381::{Fq, Fr, G1Affine};
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
-use sha3::{Digest, Keccak256};
-use alloc::{boxed::Box, vec::Vec};
 use once_cell::race::OnceBox;
+use sha3::{Digest, Keccak256};
 
 // gnark-crypto default Poseidon2 parameters for BLS12-381 (compression / MD).
 const WIDTH: usize = 2;

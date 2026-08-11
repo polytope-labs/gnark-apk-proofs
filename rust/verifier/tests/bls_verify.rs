@@ -414,7 +414,8 @@ fn test_hash_to_g1() {
 /// on a different curve point for the other, and the pairing fails with nothing to explain why.
 /// Deploying with `use_pop = false` is what lets a basic scheme signature verify here.
 ///
-///   cargo test -p gnark-plonk-verifier --test bls_verify -- test_hash_to_g1_basic_scheme --nocapture
+///   cargo test -p gnark-plonk-verifier --test bls_verify -- test_hash_to_g1_basic_scheme
+/// --nocapture
 #[test]
 fn test_hash_to_g1_basic_scheme() {
 	use w3f_bls::{EngineBLS, Message, TinyBLS381};
