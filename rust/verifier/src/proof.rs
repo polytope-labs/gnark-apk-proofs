@@ -18,6 +18,7 @@
 //! Proof bytes use gnark's `MarshalSolidity` layout (1184 bytes for 1 custom gate).
 //! VK bytes use gnark's `WriteTo` binary format.
 
+use alloc::vec::Vec;
 use ark_bls12_381::{Fr, G1Affine, G2Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{BigInteger256, BigInteger384, Field, PrimeField};
