@@ -115,16 +115,12 @@ contract ApkProof {
      * The suite is part of the signed preimage, so a verifier has to use the same one the signer
      * did. Signing with the basic scheme and verifying with PoP yields a well formed but different
      * point, and the pairing simply returns false with nothing to explain why. `w3f_bls` exposes
-     * both, `Message::new` for basic and `Message::new_assuming_pop` for PoP, so the choice is
-     * fixed at deployment rather than hardcoded here.
+     * both, `Message::new` for basic and `Message::new_assuming_pop` for PoP. Polkadot signs with
+     * the basic scheme, which is what this hashes with.
      */
     uint256 private constant CIPHER_SUITE_FIRST_32 =
         0x424c535f5349475f424c53313233383147315f584d443a5348412d3235365f53;
-    uint256 private constant CIPHER_SUITE_LAST_11_POP = 0x5357555f524f5f504f505f;
-    uint256 private constant CIPHER_SUITE_LAST_11_NUL = 0x5357555f524f5f4e554c5f;
-
-    /// Trailing 11 bytes of the cipher suite, selected at construction.
-    uint256 private immutable CIPHER_SUITE_LAST_11;
+    uint256 private constant CIPHER_SUITE_LAST_11 = 0x5357555f524f5f4e554c5f;
 
     /// BLS12-381 base field modulus p, split for mstore (32 + 16 bytes).
     /// p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
@@ -134,12 +130,9 @@ contract ApkProof {
 
     /**
      * @param _verifier The PLONK verifier for the APK circuit.
-     * @param usePopSuite True to hash with the proof-of-possession suite, false for the basic
-     *        scheme. Must match whatever the signers use, see the note on the suite constants.
      */
-    constructor(address _verifier, bool usePopSuite) {
+    constructor(address _verifier) {
         _plonk = PlonkVerifier(_verifier);
-        CIPHER_SUITE_LAST_11 = usePopSuite ? CIPHER_SUITE_LAST_11_POP : CIPHER_SUITE_LAST_11_NUL;
     }
 
     /**
