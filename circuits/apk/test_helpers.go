@@ -42,39 +42,52 @@ func decomposeFpToLimbs(val *big.Int) [6]*big.Int {
 	return limbs
 }
 
+// packLimbsNative folds limbs into native field elements exactly as the
+// in-circuit packLimbs does: LimbsPerElement limbs per output, least-significant
+// limb first, weighted by 2^(64*j). Equivalently, it splits the coordinate at
+// bit 192.
+func packLimbsNative(limbs [6]*big.Int) []*big.Int {
+	packed := make([]*big.Int, 0, (len(limbs)+LimbsPerElement-1)/LimbsPerElement)
+	for i := 0; i < len(limbs); i += LimbsPerElement {
+		acc := new(big.Int).Set(limbs[i])
+		for j := 1; j < LimbsPerElement && i+j < len(limbs); j++ {
+			acc.Add(acc, new(big.Int).Lsh(limbs[i+j], uint(64*j)))
+		}
+		packed = append(packed, acc)
+	}
+	return packed
+}
+
 // NativePublicKeysCommitment computes the Poseidon2 hash commitment over all
 // public keys outside the circuit, matching the in-circuit computation.
-// It decomposes each Fp coordinate into 6 x 64-bit limbs and hashes each limb
-// as a BLS12-381 Fr element, matching the in-circuit hasher.Write(pk.X.Limbs...).
+// It decomposes each Fp coordinate into 6 x 64-bit limbs, packs them three at a
+// time into BLS12-381 Fr elements, and absorbs the two resulting elements per
+// coordinate — matching the in-circuit hasher.Write(packLimbs(api, pk.X.Limbs)...).
 func NativePublicKeysCommitment(points []bls12381.G1Affine) *big.Int {
 	h := poseidon2.NewMerkleDamgardHasher()
 
-	// Each limb is written as a 32-byte big-endian Fr element
+	// Each packed element is written as a 32-byte big-endian Fr element
 	const elemSize = 32
 	buf := make([]byte, elemSize)
+
+	writeElem := func(v *big.Int) {
+		for j := range buf {
+			buf[j] = 0
+		}
+		b := v.Bytes()
+		copy(buf[elemSize-len(b):], b)
+		h.Write(buf)
+	}
 
 	for i := range points {
 		xInt := points[i].X.BigInt(new(big.Int))
 		yInt := points[i].Y.BigInt(new(big.Int))
 
-		xLimbs := decomposeFpToLimbs(xInt)
-		yLimbs := decomposeFpToLimbs(yInt)
-
-		for _, limb := range xLimbs {
-			for j := range buf {
-				buf[j] = 0
-			}
-			b := limb.Bytes()
-			copy(buf[elemSize-len(b):], b)
-			h.Write(buf)
+		for _, elem := range packLimbsNative(decomposeFpToLimbs(xInt)) {
+			writeElem(elem)
 		}
-		for _, limb := range yLimbs {
-			for j := range buf {
-				buf[j] = 0
-			}
-			b := limb.Bytes()
-			copy(buf[elemSize-len(b):], b)
-			h.Write(buf)
+		for _, elem := range packLimbsNative(decomposeFpToLimbs(yInt)) {
+			writeElem(elem)
 		}
 	}
 
