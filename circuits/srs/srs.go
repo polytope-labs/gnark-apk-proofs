@@ -55,6 +55,16 @@ func DefaultDir() string {
 	return filepath.Join(home, ".config", "gnark-apk-proofs", "srs")
 }
 
+// DefaultPower is log2 of the PLONK FFT domain the APK circuit needs: the
+// smallest power of two at or above its constraint count. The circuit compiles
+// to 3,284,333 SCS constraints, so 2^22 = 4,194,304 covers it with headroom.
+//
+// Raise this if the circuit ever grows past the domain — PLONK setup fails
+// outright otherwise. Note the canonical SRS may be larger than required (gnark
+// checks `>=`), but the Lagrange SRS must match the domain exactly, so changing
+// this invalidates any cached Lagrange basis for the old power.
+const DefaultPower = 22
+
 // LoadDefault loads the SRS from the default directory.
 func LoadDefault(power int) (*kzg.SRS, *kzg.SRS, error) {
 	return Load(DefaultDir(), power)
@@ -62,28 +72,86 @@ func LoadDefault(power int) (*kzg.SRS, *kzg.SRS, error) {
 
 // Load reads canonical and Lagrange KZG SRS files from the given directory,
 // downloading them from the Filecoin ceremony if they don't exist.
-// The power parameter is log2 of the domain size (e.g. 23 for ~8M constraints).
+// The power parameter is log2 of the domain size (e.g. 22 for ~4M constraints).
+//
+// The canonical SRS is basis-independent, so one file serves every power at or
+// below its size and is reused whenever it is large enough. The Lagrange basis
+// is domain-specific and must match the requested power exactly, so it is
+// cached per power and derived locally from the canonical points rather than
+// re-downloaded.
 func Load(dir string, power int) (*kzg.SRS, *kzg.SRS, error) {
 	canonicalPath := dir + "/plonk_srs.canonical"
-	lagrangePath := dir + "/plonk_srs.lagrange"
+	lagrangePath := fmt.Sprintf("%s/plonk_srs_p%d.lagrange", dir, power)
 
-	if !fileExists(canonicalPath) || !fileExists(lagrangePath) {
-		fmt.Printf("[srs] SRS files not found in %s, downloading from Filecoin ceremony...\n", dir)
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			return nil, nil, fmt.Errorf("create SRS directory: %w", err)
+	domainSize := 1 << power
+	canonicalSize := domainSize + 3
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, nil, fmt.Errorf("create SRS directory: %w", err)
+	}
+
+	// The canonical file may have been produced for a larger power; that is
+	// fine and preferred over downloading again. Only fetch when it is absent
+	// or genuinely too small.
+	var canonical kzg.SRS
+	needDownload := true
+	if fileExists(canonicalPath) {
+		if err := readSRS(canonicalPath, &canonical); err != nil {
+			return nil, nil, err
 		}
+		if len(canonical.Pk.G1) >= canonicalSize {
+			needDownload = false
+		} else {
+			fmt.Printf("[srs] Cached canonical SRS has %d points, need %d; re-downloading.\n",
+				len(canonical.Pk.G1), canonicalSize)
+		}
+	}
+	if needDownload {
+		fmt.Printf("[srs] Downloading canonical SRS for domain 2^%d from Filecoin ceremony...\n", power)
 		if err := Download(power, dir+"/plonk_srs"); err != nil {
 			return nil, nil, fmt.Errorf("download SRS: %w", err)
 		}
-		fmt.Printf("[srs] Download complete.\n")
+		canonical = kzg.SRS{}
+		if err := readSRS(canonicalPath, &canonical); err != nil {
+			return nil, nil, err
+		}
 	}
 
-	var canonical, lagrange kzg.SRS
-	if err := readSRS(canonicalPath, &canonical); err != nil {
-		return nil, nil, err
+	var lagrange kzg.SRS
+	if fileExists(lagrangePath) {
+		if err := readSRS(lagrangePath, &lagrange); err != nil {
+			return nil, nil, err
+		}
 	}
-	if err := readSRS(lagrangePath, &lagrange); err != nil {
-		return nil, nil, err
+	if len(lagrange.Pk.G1) != domainSize {
+		// Derive the Lagrange basis for this domain from the canonical points.
+		// Cheaper than another download, since the data is already local.
+		fmt.Printf("[srs] Computing Lagrange basis for domain 2^%d from canonical SRS...\n", power)
+		start := time.Now()
+		lagrangeG1 := make([]bls12381.G1Affine, domainSize)
+		copy(lagrangeG1, canonical.Pk.G1[:domainSize])
+		lagrangeG1, err := kzg.ToLagrangeG1(lagrangeG1)
+		if err != nil {
+			return nil, nil, fmt.Errorf("compute Lagrange basis: %w", err)
+		}
+		lagrange = kzg.SRS{}
+		lagrange.Pk.G1 = lagrangeG1
+		lagrange.Vk = canonical.Vk
+		fmt.Printf("[srs] Lagrange basis computed in %v\n", time.Since(start).Round(time.Second))
+		if err := writeSRS(lagrangePath, &lagrange); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	// gnark requires len(canonical) >= domain+3 and len(lagrange) == domain.
+	// Fail here with a precise message rather than deep inside plonk.Setup.
+	if len(canonical.Pk.G1) < canonicalSize {
+		return nil, nil, fmt.Errorf("canonical SRS has %d points, need at least %d for domain 2^%d",
+			len(canonical.Pk.G1), canonicalSize, power)
+	}
+	if len(lagrange.Pk.G1) != domainSize {
+		return nil, nil, fmt.Errorf("lagrange SRS has %d points, need exactly %d for domain 2^%d",
+			len(lagrange.Pk.G1), domainSize, power)
 	}
 	return &canonical, &lagrange, nil
 }
@@ -160,7 +228,9 @@ func Download(power int, outputPrefix string) error {
 	if err := writeSRS(outputPrefix+".canonical", &canonical); err != nil {
 		return err
 	}
-	if err := writeSRS(outputPrefix+".lagrange", &lagrange); err != nil {
+	// The Lagrange basis is domain-specific, so it is named per power; the
+	// canonical file is basis-independent and shared across powers.
+	if err := writeSRS(fmt.Sprintf("%s_p%d.lagrange", outputPrefix, power), &lagrange); err != nil {
 		return err
 	}
 	return nil
