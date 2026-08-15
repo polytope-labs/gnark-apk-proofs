@@ -18,12 +18,17 @@ The on-chain verifier combines APK proof verification (PLONK) with BLS aggregate
 
 ## Proving backends (CPU / GPU)
 
-The circuit (1024 validators, ~7.1M constraints) proves under either backend; both produce identical proofs verified by the same Solidity/Rust verifier.
+The circuit (1024 validators, ~3.3M constraints) proves under either backend; both produce identical proofs verified by the same Solidity/Rust verifier.
 
 | Backend | Build | Hardware | Prove time |
 |---|---|---|---|
-| **CPU** (default) | `go build` / `cargo build` | any | minutes (RAM-heavy) |
-| **GPU** (CUDA) | `go build -tags cuda` / `cargo build --features cuda` | NVIDIA + CUDA | **~12.5s** (RTX 5090) |
+| **CPU** (default) | `go build` / `cargo build` | any | ~17s |
+| **GPU** (CUDA) | `go build -tags cuda` / `cargo build --features cuda` | NVIDIA + CUDA | **~4.2s** (RTX 5090) |
+
+Both measured at domain 2^22. For reference the GPU took ~12.5s at the previous
+2^23 domain, so the domain halving is worth roughly 3x on GPU — the NTT/MSM work
+the GPU accelerates is domain-bound. Note the two GPU figures come from
+different RTX 5090 hosts, so treat the ratio as indicative rather than exact.
 
 The GPU path is a device-resident PLONK prover built on a [gnark fork](https://github.com/polytope-labs/gnark) (`gpu-plonk-prover` branch) + [libgnark_cuda](https://github.com/polytope-labs/gnark-cuda) (icicle/CUDA). It keeps the proof's polynomials on the device across the whole pipeline and is gated entirely behind `-tags cuda` — the default build is unchanged CPU-only. Building it requires libgnark_cuda + icicle at build time:
 
@@ -42,7 +47,16 @@ The Rust prover builds CPU-only by default; enable the icicle GPU backend with t
 gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", features = ["cuda"] }
 ```
 
-`build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source and links them **statically** into the binary. The result is self-contained: it runs with no `LD_LIBRARY_PATH` and no `ICICLE_BACKEND_INSTALL_DIR` — the CUDA backend is `--whole-archive`d in and registers at startup (no dlopen). The only non-system runtime dependency is the stock CUDA runtime (`libcudart`), already on any CUDA host's loader path (the CUDA runtime stays dynamic on purpose — static `cudart` breaks kernel launches). It needs the **CUDA toolkit, CMake, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`); the first `--features cuda` build compiles icicle's kernels (~10 min), later builds are incremental.
+`build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source and links them **statically** into the binary. The result is self-contained: it runs with no `LD_LIBRARY_PATH` and no `ICICLE_BACKEND_INSTALL_DIR` — the CUDA backend is `--whole-archive`d in and registers at startup (no dlopen). The only non-system runtime dependency is the stock CUDA runtime (`libcudart`), already on any CUDA host's loader path (the CUDA runtime stays dynamic on purpose — static `cudart` breaks kernel launches). It needs the **CUDA toolkit, CMake ≥ 3.24, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`); the first `--features cuda` build compiles icicle's kernels (~15 min), later builds are incremental.
+
+> **CMake 3.24 is a hard minimum.** `build.rs` configures icicle with
+> `-DCMAKE_CUDA_ARCHITECTURES=native`, which CMake only understands from 3.24.
+> Older CMake (Ubuntu 22.04 ships 3.22) expands it to an empty architecture and
+> the build dies inside compiler detection with a misleading
+> `nvcc fatal : Unsupported gpu architecture 'compute_'`. Install a newer CMake
+> rather than chasing the nvcc error.
+
+Blackwell cards (RTX 5090, `sm_120`) additionally need **CUDA ≥ 12.8** — earlier toolkits cannot target the architecture, so the failure appears when compiling icicle's kernels rather than at runtime.
 
 ```bash
 cargo test -p gnark-plonk-verifier --features gnark-apk-prover/cuda -- --ignored --nocapture
@@ -78,25 +92,75 @@ gnark-apk-proofs/
 
 ### Constraint Count
 
-| System | Constraint Type | Count     |
-|--------|-----------------|-----------|
-| PLONK  | SCS             | 7,097,608 |
+| System | Constraint Type | Count     | FFT domain |
+|--------|-----------------|-----------|------------|
+| PLONK  | SCS             | 3,284,333 | 2^22       |
+
+PLONK proving cost tracks the FFT domain size — the next power of two at or above
+the constraint count — not the constraint count itself. Getting under
+2^22 = 4,194,304 is therefore what matters, and two changes together achieved it
+from an original 7,097,608:
+
+**Limb packing (−2,457,600).** Each public key coordinate is emulated as six
+64-bit limbs. Those limbs are packed three at a time into native field elements
+before hashing, so a point costs four Poseidon2 compressions instead of twelve —
+4,096 compressions over the validator set rather than 12,288. Three limbs span
+192 bits, comfortably inside the 255-bit native field, so the packing is
+injective and the commitment binds exactly as tightly as hashing limbs
+individually.
+
+**Incomplete point addition (−1,355,675).** Aggregation uses `curve.Add`, the
+affine chord formula, rather than the complete `curve.AddUnified`. `Add` is only
+valid while the two points have distinct x-coordinates: in the degenerate case
+its λ constraint stops determining λ, which would let a prover steer the
+accumulator and forge an aggregate. Each step therefore asserts
+`acc.X ≠ pk_i.X`, which rules out both `acc = pk_i` and `acc = -pk_i` and turns
+a soundness risk into a liveness one — a collision makes the circuit unprovable
+rather than forgeable. The guard costs ~251 constraints per key against the
+~1,575 saved. See the comment in `circuits/apk/apk.go` for the full argument,
+and `TestAddGuardRejectsXCollision` for the regression test.
+
+Note this means identity points `(0,0)` are no longer neutral under aggregation.
+Padding unused validator slots with the identity is still fine — those slots are
+non-participants, so the result is discarded by the participation `Select` — but
+marking a padded slot as participating now fails the proof instead of silently
+contributing nothing.
+
+Constraint-system solving, the one phase that scales with constraint count
+rather than domain size, is a minor term throughout: 2.10s at 7.1M vs 2.04s at
+4.64M. Solving is dominated by emulated-field hints in the point arithmetic, not
+by the hash.
 
 ### Off-chain (Go)
 
-| Phase       | Time              |
-|-------------|-------------------|
-| Compile     | 5.5s              |
-| SRS / Setup | 44.8s (universal) |
-| Witness gen | 157ms             |
-| Prove       | 40.0s             |
-| Verify      | 3.3ms             |
+| Phase       | CPU     | GPU (RTX 5090) |
+|-------------|---------|----------------|
+| Compile     | 2.7s    | 2.7s           |
+| Setup       | 3.9s    | 3.9s           |
+| Witness gen | 98ms    | 98ms           |
+| Solve       | 2.0s    | 0.65s          |
+| Prove       | 17.4s   | **4.2s**       |
+| Verify      | 3.1ms   | 3.1ms          |
+
+Both at domain 2^22. Compile, setup and witness generation are backend-independent.
+
+On CPU the same machine took 68.5s to prove at domain 2^23 before the addition
+change — a 3.9x improvement, more than the ~2x the domain halving alone predicts,
+since the smaller constraint system also eases memory pressure on the RAM-heavy
+CPU path. The GPU figure was measured on a separate RTX 5090 host, so it is not
+directly comparable to the CPU column on absolute hardware terms.
+
+Setup additionally needs a Lagrange-basis SRS matching the domain exactly. It is
+derived locally from the canonical SRS on first use (~1 minute) and cached per
+power as `plonk_srs_p<power>.lagrange`, so only the first run pays for it. The
+canonical SRS is basis-independent and reused across powers rather than
+re-downloaded.
 
 ### On-chain (Solidity, EIP-2537, Prague EVM)
 
 | Operation                       | Gas     |
 |---------------------------------|---------|
-| Full verify (APK proof + BLS)   | 550,924 |
+| Full verify (APK proof + BLS)   | 550,840 |
 | hashToG1                        | 38,256  |
 
 | Metric            | Value                |
