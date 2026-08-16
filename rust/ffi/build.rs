@@ -83,6 +83,13 @@ fn main() {
 	if cfg!(target_os = "linux") {
 		println!("cargo:rustc-link-lib=dylib=resolv");
 	}
+	// On macOS the Go runtime reaches for CoreFoundation and Security for host lookups and the
+	// system certificate store. cgo does not emit these for a c-archive, so without them the link
+	// fails on undefined _CFArrayCreateMutable, _SecTrustEvaluate and friends.
+	if cfg!(target_os = "macos") {
+		println!("cargo:rustc-link-lib=framework=CoreFoundation");
+		println!("cargo:rustc-link-lib=framework=Security");
+	}
 
 	// Link the GPU stack fully static so the binary is self-contained: only system libs end up
 	// as NEEDED, and it runs with no LD_LIBRARY_PATH / ICICLE_BACKEND_INSTALL_DIR.

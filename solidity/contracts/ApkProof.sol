@@ -120,12 +120,21 @@ contract ApkProof {
         69304817850384178235384652711014277219752988873539414788182467642510429663469;
 
     /**
-     * w3f/bls cipher suite prefix for message signing (assuming PoP):
-     * "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_" (43 bytes, split 32+11)
+     * w3f/bls cipher suite prefix for message signing, 43 bytes split 32+11. The first 32 bytes
+     * are common to both schemes; only the trailing tag differs:
+     *
+     *   "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_POP_"  proof of possession
+     *   "BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_"  basic
+     *
+     * The suite is part of the signed preimage, so a verifier has to use the same one the signer
+     * did. Signing with the basic scheme and verifying with PoP yields a well formed but different
+     * point, and the pairing simply returns false with nothing to explain why. `w3f_bls` exposes
+     * both, `Message::new` for basic and `Message::new_assuming_pop` for PoP. Polkadot signs with
+     * the basic scheme, which is what this hashes with.
      */
     uint256 private constant CIPHER_SUITE_FIRST_32 =
         0x424c535f5349475f424c53313233383147315f584d443a5348412d3235365f53;
-    uint256 private constant CIPHER_SUITE_LAST_11 = 0x5357555f524f5f504f505f;
+    uint256 private constant CIPHER_SUITE_LAST_11 = 0x5357555f524f5f4e554c5f;
 
     /// BLS12-381 base field modulus p, split for mstore (32 + 16 bytes).
     /// p = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab
@@ -133,6 +142,9 @@ contract ApkProof {
         0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f624;
     uint256 private constant BLS_P_LAST_16 = 0x1eabfffeb153ffffb9feffffffffaaab;
 
+    /**
+     * @param _verifier The PLONK verifier for the APK circuit.
+     */
     constructor(address _verifier) {
         _plonk = PlonkVerifier(_verifier);
     }

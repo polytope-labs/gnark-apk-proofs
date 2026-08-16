@@ -4,13 +4,27 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-ark-bls12-381 = "0.5"
-ark-ec = "0.5"
-ark-ff = "0.5"
-ark-serialize = "0.5"
-sha2 = "0.10"
-sha3 = "0.10"
-thiserror = "2"
+ark-bls12-381 = { version = "0.5", default-features = false, features = ["curve"] }
+ark-ec = { version = "0.5", default-features = false }
+ark-ff = { version = "0.5", default-features = false }
+ark-serialize = { version = "0.5", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+sha3 = { version = "0.10", default-features = false }
+thiserror = { version = "2", default-features = false }
+once_cell = { version = "1", default-features = false, features = ["alloc"] }
+
+[features]
+default = ["std"]
+std = [
+    "ark-bls12-381/std",
+    "ark-ec/std",
+    "ark-ff/std",
+    "ark-serialize/std",
+    "sha2/std",
+    "sha3/std",
+    "thiserror/std",
+    "once_cell/std",
+]
 
 [dev-dependencies]
 gnark-apk-prover = { path = "../prover", features = ["test-utils"] }

@@ -20,6 +20,7 @@
 //! The hash input starts at byte offset 0x1b (27) from the label — i.e. only the
 //! last 5 bytes of the 32-byte label slot are included for 5-char labels.
 
+use alloc::vec::Vec;
 use ark_bls12_381::{Fq, Fr, G1Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{Field, PrimeField};

@@ -18,6 +18,7 @@
 //! This is a direct translation of gnark's Solidity PLONK verifier into safe Rust
 //! using arkworks BLS12-381 types.
 
+use alloc::{format, vec, vec::Vec};
 use ark_bls12_381::{Bls12_381, Fr, G1Affine, G1Projective};
 use ark_ec::{pairing::Pairing, AffineRepr, CurveGroup, VariableBaseMSM};
 use ark_ff::{Field, One, PrimeField, Zero};

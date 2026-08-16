@@ -273,7 +273,8 @@ fn test_full_verify() {
 
 	// ── 4. BLS sign with w3f/bls and aggregate ──
 	let raw_msg = b"test message for full verify";
-	let message = Message::new_assuming_pop(b"", raw_msg);
+	// The basic scheme, which is what the contract hashes with and what polkadot signs with.
+	let message = Message::new(b"", raw_msg);
 
 	// Sign with each participating validator's w3f/bls keypair and aggregate
 	let sigs: Vec<G1Projective> = participation
@@ -370,49 +371,54 @@ fn test_full_verify() {
 	}
 }
 
-/// Test hashToG1 against w3f/bls reference implementation.
+/// hashToG1 has to agree with what the chain signs, and disagree with the other suite.
 ///
-///   cargo test -p gnark-plonk-verifier --test bls_verify -- test_hash_to_g1 --nocapture
+/// `Message::new` selects the `..._NUL_` cipher suite where `Message::new_assuming_pop` selects
+/// `..._POP_`. The suite is part of the signed preimage, so a contract built for one scheme lands
+/// on a different curve point for the other, and the pairing fails with nothing to explain why.
+/// The PoP vector is checked too, so a suite that never reached the hash cannot pass this.
+///
+///   cargo test -p gnark-plonk-verifier --test bls_verify -- test_hash_to_g1_basic_scheme
+/// --nocapture
 #[test]
-fn test_hash_to_g1() {
+fn test_hash_to_g1_basic_scheme() {
 	use w3f_bls::{EngineBLS, Message, TinyBLS381};
 
 	let context = b"";
 	let raw_msg = b"hello world";
 
-	// Compute expected point via w3f/bls
-	let message = Message::new_assuming_pop(context, raw_msg);
+	let message = Message::new(context, raw_msg);
 	let expected_proj = message.hash_to_signature_curve::<TinyBLS381>();
-
-	// Convert w3f/bls output (ark 0.4 G1Affine) to bytes32[3] for comparison via
-	// canonical serialization rather than a layout-dependent transmute (finding 35).
 	let expected_bytes = {
 		let affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = expected_proj.into();
 		let affine_v5: G1Affine = convert_04_to_05(&affine);
 		g1_to_bytes32x3(&affine_v5)
 	};
 
-	// Contract prepends cipher suite internally, just pass context || raw_msg
 	let msg_input = [context.as_slice(), raw_msg.as_slice()].concat();
 
-	// Deploy contract and call hashToG1
+	// What the same message hashes to under the other suite, which the contract must not produce.
+	let pop_bytes = {
+		let pop =
+			Message::new_assuming_pop(context, raw_msg).hash_to_signature_curve::<TinyBLS381>();
+		let affine: <TinyBLS381 as EngineBLS>::SignatureGroupAffine = pop.into();
+		let affine_v5: G1Affine = convert_04_to_05(&affine);
+		g1_to_bytes32x3(&affine_v5)
+	};
+
 	let mut evm = create_evm();
 	let mut nonce = 0u64;
 	let contract = deploy_contracts(&mut evm, &mut nonce);
 
 	let calldata = hashToG1Call { message: msg_input.into() }.abi_encode();
-
-	let result = call(&mut evm, &mut nonce, contract, Bytes::from(calldata));
-
-	match result {
-		ExecutionResult::Success { gas, output: Output::Call(out), .. } => {
-			let decoded = <hashToG1Call as SolCall>::abi_decode_returns(&out).unwrap();
-			assert_eq!(decoded, expected_bytes, "hashToG1 output mismatch vs w3f/bls");
-			println!("hashToG1 PASSED (w3f/bls compat) — gas: {}", gas.spent());
-		},
-		ExecutionResult::Revert { output, .. } => {
-			panic!("hashToG1 reverted: 0x{}", alloy_primitives::hex::encode(&output));
-		},
+	let out = match call(&mut evm, &mut nonce, contract, Bytes::from(calldata)) {
+		ExecutionResult::Success { output: Output::Call(out), .. } =>
+			<hashToG1Call as SolCall>::abi_decode_returns(&out).unwrap(),
 		other => panic!("hashToG1 failed: {:?}", other),
-	}
+	};
+
+	assert_eq!(out, expected_bytes, "basic scheme output mismatch vs w3f/bls Message::new");
+	assert_ne!(out, pop_bytes, "hashed under the PoP suite, so the basic scheme never reached it");
+
+	println!("hashToG1 PASSED for the basic scheme, and differs from the PoP vector as expected");
 }

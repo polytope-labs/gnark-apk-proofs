@@ -35,13 +35,14 @@
 //! absorbing each limb separately, at a third of the compressions. See the
 //! `LimbsPerElement` soundness note in `circuits/apk/apk.go`.
 
+use alloc::{boxed::Box, vec::Vec};
 use ark_bls12_381::{Fq, Fr, G1Affine};
 use ark_ec::AffineRepr;
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
+use once_cell::race::OnceBox;
 
 use crate::error::VerifierError;
 use sha3::{Digest, Keccak256};
-use std::sync::OnceLock;
 
 // gnark-crypto default Poseidon2 parameters for BLS12-381 (compression / MD).
 const WIDTH: usize = 2;
@@ -56,7 +57,7 @@ const SEED: &str = "Poseidon2-BLS12_381[t=2,rF=6,rP=50,d=5]";
 /// `rndₖ₊₁ = Keccak(rndₖ)`, each key being `rnd mod r` (big-endian). Full rounds
 /// carry `WIDTH` keys; partial rounds carry one (only lane 0 is keyed).
 fn round_keys() -> &'static Vec<Vec<Fr>> {
-	static KEYS: OnceLock<Vec<Vec<Fr>>> = OnceLock::new();
+	static KEYS: OnceBox<Vec<Vec<Fr>>> = OnceBox::new();
 	KEYS.get_or_init(|| {
 		let half_full = FULL_ROUNDS / 2;
 		let total = FULL_ROUNDS + PARTIAL_ROUNDS;
@@ -72,7 +73,7 @@ fn round_keys() -> &'static Vec<Vec<Fr>> {
 			}
 			keys.push(row);
 		}
-		keys
+		Box::new(keys)
 	})
 }
 
