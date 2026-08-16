@@ -36,7 +36,10 @@
 //! `LimbsPerElement` soundness note in `circuits/apk/apk.go`.
 
 use ark_bls12_381::{Fq, Fr, G1Affine};
+use ark_ec::AffineRepr;
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
+
+use crate::error::VerifierError;
 use sha3::{Digest, Keccak256};
 use std::sync::OnceLock;
 
@@ -189,12 +192,63 @@ fn coord_packed(c: Fq) -> [Fr; 2] {
 /// followed by the two of `Y`. The caller must supply the same point list the
 /// circuit binds to (e.g. the full validator set in registration order, padded
 /// to 1024 with the identity point).
+///
+/// # Soundness
+///
+/// This function hashes coordinates verbatim and performs **no** curve or
+/// subgroup validation. The APK circuit's soundness depends on the committed key
+/// set being entirely in G1 (see the coset-seed argument in
+/// `circuits/apk/apk.go`): a committed point on the curve but outside G1 would
+/// void that argument. It is the CALLER's responsibility to ensure every point
+/// is a valid G1 element before committing — e.g. by obtaining them via ark's
+/// checked `deserialize_compressed` (which subgroup-checks by default) rather
+/// than an `_unchecked` path. When that guarantee is not already established,
+/// prefer [`public_keys_commitment_checked`], which validates first.
 pub fn public_keys_commitment(points: &[G1Affine]) -> Fr {
 	merkle_damgard(points.iter().flat_map(|p| {
 		let x = coord_packed(p.x);
 		let y = coord_packed(p.y);
 		x.into_iter().chain(y)
 	}))
+}
+
+/// [`public_keys_commitment`] with an explicit G1-membership guard on every
+/// point.
+///
+/// Each point must be on the BLS12-381 curve and in the prime-order subgroup;
+/// the identity point is accepted (it is the circuit's padding value for unused
+/// validator slots). Returns [`VerifierError::PointNotOnCurve`] or
+/// [`VerifierError::PointNotInSubgroup`] on the first point that fails.
+///
+/// Use this when deriving the trusted committee commitment `C` from points whose
+/// provenance does not already guarantee G1 membership. The check is what ties
+/// `C` to the circuit's soundness precondition; see the `# Soundness` note on
+/// [`public_keys_commitment`].
+pub fn public_keys_commitment_checked(points: &[G1Affine]) -> Result<Fr, VerifierError> {
+	for p in points {
+		if p.is_zero() {
+			continue; // identity: valid padding, not on the affine curve
+		}
+		if !p.is_on_curve() {
+			return Err(VerifierError::PointNotOnCurve);
+		}
+		if !p.is_in_correct_subgroup_assuming_on_curve() {
+			return Err(VerifierError::PointNotInSubgroup);
+		}
+	}
+	Ok(public_keys_commitment(points))
+}
+
+/// [`public_keys_commitment_bytes`] with the G1-membership guard of
+/// [`public_keys_commitment_checked`].
+pub fn public_keys_commitment_bytes_checked(
+	points: &[G1Affine],
+) -> Result<[u8; 32], VerifierError> {
+	let fr = public_keys_commitment_checked(points)?;
+	let mut out = [0u8; 32];
+	let be = fr.into_bigint().to_bytes_be();
+	out[32 - be.len()..].copy_from_slice(&be);
+	Ok(out)
 }
 
 /// The commitment as a 32-byte big-endian value — i.e. the
@@ -311,6 +365,63 @@ mod tests {
 				// occurred, so the encoding is injective.
 				assert!(p.into_bigint().num_bits() <= 192, "packed[{i}] exceeds 192 bits");
 			}
+		}
+	}
+
+	/// An on-curve point outside the prime-order G1 subgroup, for the guard test.
+	fn on_curve_not_in_subgroup() -> G1Affine {
+		use ark_ff::{Field as _, One};
+		let mut x = Fq::from(2u64);
+		let four = Fq::from(4u64);
+		for _ in 0..1000 {
+			let rhs = x * x * x + four;
+			if let Some(y) = rhs.sqrt() {
+				let pt = G1Affine::new_unchecked(x, y);
+				if pt.is_on_curve() && !pt.is_in_correct_subgroup_assuming_on_curve() {
+					return pt;
+				}
+			}
+			x += Fq::one();
+		}
+		panic!("could not construct on-curve non-subgroup point");
+	}
+
+	/// The checked wrapper accepts a valid G1 set (identity padding included) and
+	/// agrees with the unchecked function on the digest.
+	#[test]
+	fn checked_accepts_valid_g1_and_matches_unchecked() {
+		let mut pts = k_times_generator(3);
+		pts.push(G1Affine::identity()); // padding is allowed
+		let got = public_keys_commitment_checked(&pts).expect("valid G1 set rejected");
+		assert_eq!(got, public_keys_commitment(&pts));
+	}
+
+	/// The checked wrapper rejects an on-curve point outside G1 — the case that
+	/// would void the circuit's coset-seed soundness argument if committed.
+	#[test]
+	fn checked_rejects_non_subgroup_point() {
+		let mut pts = k_times_generator(3);
+		pts.insert(1, on_curve_not_in_subgroup());
+		match public_keys_commitment_checked(&pts) {
+			Err(VerifierError::PointNotInSubgroup) => {},
+			other => panic!("expected PointNotInSubgroup, got {other:?}"),
+		}
+		// The bytes variant guards identically.
+		assert!(matches!(
+			public_keys_commitment_bytes_checked(&pts),
+			Err(VerifierError::PointNotInSubgroup)
+		));
+	}
+
+	/// The checked wrapper rejects an off-curve point.
+	#[test]
+	fn checked_rejects_off_curve_point() {
+		let mut pts = k_times_generator(3);
+		// (1, 1) is not on y^2 = x^3 + 4.
+		pts.insert(1, G1Affine::new_unchecked(Fq::from(1u64), Fq::from(1u64)));
+		match public_keys_commitment_checked(&pts) {
+			Err(VerifierError::PointNotOnCurve) => {},
+			other => panic!("expected PointNotOnCurve, got {other:?}"),
 		}
 	}
 }
