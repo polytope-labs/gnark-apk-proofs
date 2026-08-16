@@ -195,15 +195,11 @@ fn coord_packed(c: Fq) -> [Fr; 2] {
 ///
 /// # Soundness
 ///
-/// This function hashes coordinates verbatim and performs **no** curve or
-/// subgroup validation. The APK circuit's soundness depends on the committed key
-/// set being entirely in G1 (see the coset-seed argument in
-/// `circuits/apk/apk.go`): a committed point on the curve but outside G1 would
-/// void that argument. It is the CALLER's responsibility to ensure every point
-/// is a valid G1 element before committing — e.g. by obtaining them via ark's
-/// checked `deserialize_compressed` (which subgroup-checks by default) rather
-/// than an `_unchecked` path. When that guarantee is not already established,
-/// prefer [`public_keys_commitment_checked`], which validates first.
+/// Hashes coordinates verbatim with **no** curve or subgroup check. The circuit's
+/// soundness needs every committed key in G1 (coset-seed argument in
+/// `circuits/apk/apk.go`), so the caller must pass valid G1 points — e.g. from
+/// ark's checked `deserialize_compressed`. Otherwise use
+/// [`public_keys_commitment_checked`].
 pub fn public_keys_commitment(points: &[G1Affine]) -> Fr {
 	merkle_damgard(points.iter().flat_map(|p| {
 		let x = coord_packed(p.x);
