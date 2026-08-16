@@ -20,6 +20,8 @@ import (
 	"math/big"
 
 	bls12381 "github.com/consensys/gnark-crypto/ecc/bls12-381"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/fp"
+	"github.com/consensys/gnark-crypto/ecc/bls12-381/hash_to_curve"
 	"github.com/consensys/gnark/frontend"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_bls12381"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
@@ -37,13 +39,13 @@ import (
 // hashing each limb separately, at a third of the compressions.
 //
 // SOUNDNESS INVARIANT: injectivity depends on every limb being range-checked to
-// 64 bits. That is supplied by the unconditional emulated point arithmetic in
-// Define (curve.Add and the AssertIsDifferent guard preceding it) — gnark's
-// emulated operations range-check their operands' limbs. Do not make those
-// calls conditional on the participation bit. Without the range checks a prover
-// could shift a limb by the native modulus r, leaving the packed value (and
-// hence the digest) unchanged while altering the coordinate it represents,
-// forging a public key under the committed validator set.
+// 64 bits. That is supplied by the unconditional curve.Add in Define — its
+// internal subtractions width-enforce both coordinates' limbs of both operands,
+// so every PublicKeys[i].X/.Y limb absorbed by the hash is range-checked.
+// Do not make that call conditional on the participation bit. Without the
+// range checks a prover could shift a limb by the native modulus r, leaving the
+// packed value (and hence the digest) unchanged while altering the coordinate
+// it represents, forging a public key under the committed validator set.
 const LimbsPerElement = 3
 
 // limbShifts are the positional weights 2^(64*i) used by the packing.
@@ -71,17 +73,48 @@ func packLimbs(api frontend.API, limbs []frontend.Variable) []frontend.Variable 
 	return packed
 }
 
-// ProtocolSeed returns the fixed seed point for APK aggregation.
-// Computed deterministically via HashToG1 with domain separator "gnark-apk-proofs"
-// and tag "apk-seed". The result is a point in the G1 subgroup.
+// ProtocolSeed returns the fixed seed point for APK aggregation: a point on
+// E(Fp) that is deliberately NOT in the prime-order subgroup G1.
 //
-// The seed ensures the running accumulator is never the point at infinity
-// during aggregation. See Section 4.1 of "Accountable Light Client Systems
-// for PoS Blockchains" (Ciobotaru et al., https://eprint.iacr.org/2022/1205).
+// Derivation is deterministic: hash-to-field with domain separator
+// "gnark-apk-proofs" and tag "apk-seed-coset", then the RFC 9380 SSWU map and
+// isogeny onto E(Fp) — i.e. HashToG1 WITHOUT the final cofactor clearing. A
+// uniformly mapped curve point lands in G1 with probability 1/cofactor
+// (≈ 2^-125 for BLS12-381 G1), and non-membership is asserted below, so the
+// seed provably lies in E(Fp) \ G1.
+//
+// Why outside the subgroup: the circuit aggregates with the incomplete chord
+// addition, whose constraint degenerates when the two operands share an
+// x-coordinate (acc = ±pk_i). Every registered public key is in G1 (enforced
+// by ParseG1 at the FFI boundary and by PoP registration), so the accumulator
+// seed + Σ pk_j lives in the coset seed + G1, which is DISJOINT from G1 —
+// acc = ±pk_i is algebraically impossible, for participants and non-participants
+// alike, and the accumulator can never reach the point at infinity. This is the
+// construction of Ciobotaru et al. (https://eprint.iacr.org/2022/1205, §5.1,
+// Claim 2), where the seed h ∈ E \ G1 makes the degenerate case unreachable
+// with no in-circuit guard.
+//
+// The seed is a protocol constant, mirrored in solidity/contracts/ApkProof.sol
+// (SEED_0..SEED_2); TestProtocolSeedVectors locks the coordinates. Changing the
+// derivation is a protocol break: both copies and the locked vectors must be
+// regenerated together.
 func ProtocolSeed() bls12381.G1Affine {
-	pt, err := bls12381.HashToG1([]byte("gnark-apk-proofs"), []byte("apk-seed"))
+	u, err := fp.Hash([]byte("gnark-apk-proofs"), []byte("apk-seed-coset"), 1)
 	if err != nil {
 		panic("failed to compute protocol seed: " + err.Error())
+	}
+	pt := bls12381.MapToCurve1(&u[0])
+	// MapToCurve1 lands on the SSWU isogenous curve; apply the isogeny to get
+	// onto E(Fp). Deliberately no ClearCofactor.
+	hash_to_curve.G1Isogeny(&pt.X, &pt.Y)
+
+	// Both properties are load-bearing for circuit soundness; the derivation is
+	// deterministic, so these can only fire if the derivation itself changes.
+	if !pt.IsOnCurve() {
+		panic("protocol seed is not on E(Fp)")
+	}
+	if pt.IsInSubGroup() {
+		panic("protocol seed must not be in the G1 subgroup")
 	}
 	return pt
 }
@@ -147,12 +180,6 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	if err != nil {
 		return err
 	}
-	// Shares the kvstore-cached Field instance that curve uses, so the limb
-	// range checks below are not duplicated.
-	baseApi, err := emulated.NewField[emulated.BLS12381Fp](api)
-	if err != nil {
-		return err
-	}
 	seed := sw_bls12381.NewG1Affine(ProtocolSeed())
 	apk := &seed
 
@@ -167,13 +194,9 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	// Proof of Possession at registration covers secret-key ownership only — it is
 	// a separate guarantee from the algebraic point validation done in ParseG1.
 	//
-	// Note that point validity is orthogonal to the x-collision guard below: a
-	// perfectly valid, registered key can still share an x-coordinate with the
-	// running accumulator, so ParseG1 does not subsume AssertIsDifferent.
-	//
 	// Each coordinate's 6 limbs are packed into 2 native field elements, so a
-	// point costs 4 compressions instead of 12. The point arithmetic below must
-	// stay unconditional — see the SOUNDNESS INVARIANT on LimbsPerElement.
+	// point costs 4 compressions instead of 12. curve.Add must stay
+	// unconditional — see the SOUNDNESS INVARIANT on LimbsPerElement.
 	//
 	// curve.Add is the incomplete chord formula: it computes
 	//
@@ -181,31 +204,32 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	//
 	// where the division is a prover-supplied hint bound by the constraint
 	// λ·(q.x - p.x) = q.y - p.y. That constraint pins λ to a unique value only
-	// while q.x ≠ p.x. If the accumulator ever shares an x-coordinate with the
-	// key being added, it degenerates:
+	// while q.x ≠ p.x — if the accumulator ever shared an x-coordinate with the
+	// key being added (acc = ±pk_i), λ would become a free witness and a prover
+	// could steer the accumulator to a point of their choosing.
 	//
-	//   - apk = pk_i: both sides vanish, leaving λ·0 = 0, which every λ
-	//     satisfies. λ becomes a free witness feeding x_r and y_r, letting a
-	//     prover steer the accumulator to a point of their choosing and forge
-	//     an aggregate. Intermediate points are never checked on-curve, so
-	//     nothing downstream catches it.
-	//   - apk = -pk_i: the constraint becomes λ·0 = -2y ≠ 0, unsatisfiable.
+	// That degenerate case is unreachable BY CONSTRUCTION OF THE SEED: the
+	// accumulator starts at ProtocolSeed() ∈ E(Fp) \ G1 and every added key is
+	// in G1, so each partial sum lives in the coset seed + G1, which is disjoint
+	// from G1. Points sharing an x-coordinate are exactly ±each other, so
+	// acc = ±pk_i would put a coset element inside G1 — impossible. The same
+	// argument keeps the accumulator off the point at infinity (acc = -pk_i is
+	// the only route there). This is Ciobotaru et al.'s construction
+	// (https://eprint.iacr.org/2022/1205, §5.1 Observation 3 / Claim 2), and it
+	// holds for every one of the 1024 keys — participants and non-participants
+	// alike, since Add runs unconditionally before the Select.
 	//
-	// The protocol seed does not cover this. It keeps the accumulator off the
-	// point at infinity (Ciobotaru et al. §4.1), a different degeneracy, and
-	// says nothing about a collision with the next key.
-	//
-	// AssertIsDifferent on the x-coordinates rules out both cases — they are
-	// exactly the x-collision — and converts what would be a soundness risk
-	// into a liveness one: a collision makes the circuit unprovable rather than
-	// forgeable. Security therefore rests on the guard, not on an argument that
-	// a prover cannot search bitlists for a subset whose accumulator collides
-	// with a registered key.
+	// SOUNDNESS DEPENDENCY: this argument leans on every COMMITTED key being in
+	// G1. That is enforced where the commitment's key set enters the system —
+	// ParseG1's subgroup check at the FFI boundary, backed by PoP registration.
+	// The subgroup check is therefore load-bearing for the incomplete addition,
+	// not merely for BLS key hygiene: committing a valid-curve point OUTSIDE G1
+	// would void the coset argument and reopen the free-λ forgery. Do not weaken
+	// ParseG1, and do not introduce a commitment path that bypasses it.
 	for i := range 1024 {
 		hasher.Write(packLimbs(api, circuit.PublicKeys[i].X.Limbs)...)
 		hasher.Write(packLimbs(api, circuit.PublicKeys[i].Y.Limbs)...)
 
-		baseApi.AssertIsDifferent(&apk.X, &circuit.PublicKeys[i].X)
 		temp := curve.Add(apk, &circuit.PublicKeys[i])
 		apk = curve.Select(bits[i], temp, apk)
 	}

@@ -16,6 +16,7 @@
 package apk
 
 import (
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -28,29 +29,62 @@ import (
 	"github.com/consensys/gnark/test"
 )
 
-// TestAddGuardRejectsXCollision checks that the AssertIsDifferent guard in
-// Define rejects a witness in which the accumulator shares an x-coordinate with
-// the key being added — the case where the incomplete chord formula degenerates
-// and λ would otherwise become a free witness.
-//
-// The witness is valid in every other respect: the commitment is computed over
-// the actual points, and the expected aggregate matches the participation set.
-// Index 0 is deliberately *not* a participant, so the colliding addition is
-// discarded by the Select. The guard is unconditional, so the circuit must
-// still reject — which is the point, since the range checks and the guard both
-// have to hold for every key, not only for participants.
-//
-// Note the guard is what makes this a constraint. An honest solver would also
-// fail here, because the division hint cannot invert zero — but hints are
-// prover-supplied, so hint behaviour binds nothing. Only the assertion does.
-func TestAddGuardRejectsXCollision(t *testing.T) {
+// TestProtocolSeedOutsideSubgroup locks the coset invariant the circuit's
+// soundness rests on: the seed is on E(Fp) but NOT in the prime-order subgroup
+// G1. The circuit aggregates with the incomplete chord addition and has no
+// in-circuit x-collision guard; the degenerate case acc = ±pk_i is excluded
+// because the accumulator lives in the coset seed + G1, disjoint from G1 —
+// which is only true while this test passes. See ProtocolSeed and
+// Ciobotaru et al. (eprint 2022/1205, §5.1 Claim 2).
+func TestProtocolSeedOutsideSubgroup(t *testing.T) {
+	seed := ProtocolSeed()
+	if !seed.IsOnCurve() {
+		t.Fatal("protocol seed is not on E(Fp)")
+	}
+	if seed.IsInSubGroup() {
+		t.Fatal("protocol seed is in G1: the coset argument excluding the incomplete-addition degeneracy is void")
+	}
+	if seed.IsInfinity() {
+		t.Fatal("protocol seed is the point at infinity")
+	}
+}
+
+// TestProtocolSeedVectors locks the seed coordinates as 48-byte big-endian hex.
+// The same point is hardcoded in solidity/contracts/ApkProof.sol as
+// SEED_0..SEED_2; if the derivation ever changes, both copies and these vectors
+// must be regenerated together — silently diverging copies would make on-chain
+// verification reject every proof.
+func TestProtocolSeedVectors(t *testing.T) {
+	const (
+		wantX = "19742ffba069554d8cacceb8ed5514b2ecf72cd7372d3414203338f4fd3b3cc742fb160f8eb5818422246de186e0814a"
+		wantY = "0e0f5d1199876e646952fb74d39e0b34042a8d48786adae7e0fccf4b0236c72e82343de94c9d12bf17d22bec9edbbe2b"
+	)
+	seed := ProtocolSeed()
+	x := seed.X.Bytes()
+	y := seed.Y.Bytes()
+	if got := fmt.Sprintf("%x", x); got != wantX {
+		t.Errorf("seed X:\n got  %s\n want %s", got, wantX)
+	}
+	if got := fmt.Sprintf("%x", y); got != wantY {
+		t.Errorf("seed Y:\n got  %s\n want %s", got, wantY)
+	}
+}
+
+// TestDegenerateAdditionUnsolvable documents what happens if a committed key
+// nonetheless collided with the accumulator: the witness cannot be solved,
+// because the in-circuit division hint hits a zero denominator. Such a witness
+// cannot occur for G1 keys (the coset argument), so the test plants the seed
+// itself as "key" 0 — a curve point outside G1 that ParseG1 would reject at the
+// FFI boundary. This is a liveness observation, not the soundness argument; the
+// soundness argument is TestProtocolSeedOutsideSubgroup.
+func TestDegenerateAdditionUnsolvable(t *testing.T) {
 	const numPoints = 1024
 
 	_, _, g, _ := bls12381.Generators()
 	seed := ProtocolSeed()
 
 	points := make([]bls12381.G1Affine, numPoints)
-	// Index 0 collides with the initial accumulator value.
+	// Key 0 equals the initial accumulator: x-collision at i=0.
 	points[0] = seed
 	for i := 1; i < numPoints; i++ {
 		var s fr.Element
@@ -79,13 +113,13 @@ func TestAddGuardRejectsXCollision(t *testing.T) {
 	}
 
 	if err := test.IsSolved(&ApkProofCircuit{}, witness, ecc.BLS12_381.ScalarField()); err == nil {
-		t.Fatal("circuit solved despite an x-coordinate collision between the accumulator and a public key")
+		t.Fatal("witness with an accumulator/key x-collision solved; expected the division hint to fail")
 	}
 }
 
-// TestAddGuardAcceptsDistinctKeys is the positive control for the test above:
-// the same construction with a non-colliding key at index 0 must solve.
-func TestAddGuardAcceptsDistinctKeys(t *testing.T) {
+// TestAggregationSolvesWithDistinctKeys is the positive control: a well-formed
+// witness over G1 keys solves.
+func TestAggregationSolvesWithDistinctKeys(t *testing.T) {
 	const numPoints = 1024
 
 	_, _, g, _ := bls12381.Generators()

@@ -94,7 +94,7 @@ gnark-apk-proofs/
 
 | System | Constraint Type | Count     | FFT domain |
 |--------|-----------------|-----------|------------|
-| PLONK  | SCS             | 3,284,333 | 2^22       |
+| PLONK  | SCS             | 3,027,309 | 2^22       |
 
 PLONK proving cost tracks the FFT domain size — the next power of two at or above
 the constraint count — not the constraint count itself. Getting under
@@ -109,27 +109,46 @@ before hashing, so a point costs four Poseidon2 compressions instead of twelve �
 injective and the commitment binds exactly as tightly as hashing limbs
 individually.
 
-**Incomplete point addition (−1,355,675).** Aggregation uses `curve.Add`, the
-affine chord formula, rather than the complete `curve.AddUnified`. `Add` is only
-valid while the two points have distinct x-coordinates: in the degenerate case
-its λ constraint stops determining λ, which would let a prover steer the
-accumulator and forge an aggregate. Each step therefore asserts
-`acc.X ≠ pk_i.X`, which rules out both `acc = pk_i` and `acc = -pk_i` and turns
-a soundness risk into a liveness one — a collision makes the circuit unprovable
-rather than forgeable. The guard costs ~251 constraints per key against the
-~1,575 saved. See the comment in `circuits/apk/apk.go` for the full argument,
-and `TestAddGuardRejectsXCollision` for the regression test.
+**Incomplete point addition with a coset seed (−1,612,699).** Aggregation uses
+`curve.Add`, the affine chord formula, rather than the complete
+`curve.AddUnified`. `Add` is only valid while the two points have distinct
+x-coordinates: in the degenerate case its λ constraint stops determining λ,
+which would let a prover steer the accumulator and forge an aggregate. The
+degenerate case is made unreachable by construction rather than by an in-circuit
+guard: the protocol seed is a point on E(Fp) that is deliberately **not** in the
+G1 subgroup (SSWU map without cofactor clearing), so the accumulator
+`seed + Σ pk_i` lives in the coset `seed + G1`, disjoint from G1 — it can never
+equal `±pk_i` or reach infinity, for participants and non-participants alike.
+This is the construction of Ciobotaru et al. (eprint 2022/1205, §5.1), and it
+costs zero constraints. `TestProtocolSeedOutsideSubgroup` locks the invariant;
+`TestProtocolSeedVectors` locks the coordinates against the copy in
+`ApkProof.sol`.
 
-Note this means identity points `(0,0)` are no longer neutral under aggregation.
-Padding unused validator slots with the identity is still fine — those slots are
+The coset argument leans on every **committed** key being in G1. That is
+enforced at the FFI trust boundary (`ParseG1` performs on-curve and subgroup
+checks on all 1024 keys) and by Proof-of-Possession registration — the subgroup
+check is load-bearing for the incomplete addition's soundness, not merely BLS
+key hygiene.
+
+On-chain this is transparent: the contract adds the seed to the caller's APK via
+the EIP-2537 `G1ADD` precompile, which checks on-curve only (no subgroup check),
+and the seed never reaches the pairing precompile — the BLS check uses the APK
+alone.
+
+Note that identity points `(0,0)` are not neutral under aggregation. Padding
+unused validator slots with the identity is fine — those slots are
 non-participants, so the result is discarded by the participation `Select` — but
-marking a padded slot as participating now fails the proof instead of silently
+marking a padded slot as participating fails the proof instead of silently
 contributing nothing.
 
 Constraint-system solving, the one phase that scales with constraint count
 rather than domain size, is a minor term throughout: 2.10s at 7.1M vs 2.04s at
 4.64M. Solving is dominated by emulated-field hints in the point arithmetic, not
 by the hash.
+
+The prove-time figures below were measured at 3,284,333 constraints (an earlier
+revision with an in-circuit x-collision guard instead of the coset seed); the
+FFT domain is unchanged at 2^22, so they carry over.
 
 ### Off-chain (Go)
 
