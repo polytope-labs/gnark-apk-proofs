@@ -189,6 +189,20 @@ fn coord_packed(c: Fq) -> [Fr; 2] {
 /// circuit's `PublicKeysCommitment` public input (and to the Go reference
 /// `apk.NativePublicKeysCommitment`).
 ///
+/// Validator slots the APK circuit is fixed to. A shorter set is padded to this width with the
+/// identity point, which contributes nothing to the aggregate.
+pub const NUM_VALIDATORS: usize = 1024;
+
+/// Pad a key list to the circuit's width with the identity point.
+///
+/// The circuit binds a fixed number of slots, so a set shorter than that has to be extended before
+/// it is committed to, and both sides must pad the same way or the commitments disagree.
+pub fn padded_to_circuit_width(keys: &[G1Affine]) -> Vec<G1Affine> {
+	let mut points = keys.to_vec();
+	points.resize(NUM_VALIDATORS, G1Affine::identity());
+	points
+}
+
 /// Each point contributes four `Fr` blocks — the two packed halves of `X`
 /// followed by the two of `Y`. The caller must supply the same point list the
 /// circuit binds to (e.g. the full validator set in registration order, padded

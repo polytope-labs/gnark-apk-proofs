@@ -41,10 +41,10 @@ pub mod proof;
 pub mod transcript;
 pub mod verifier;
 
-pub use ark_bls12_381::Fr;
+pub use ark_bls12_381::{Fr, G1Affine};
 pub use commitment::{
-	public_keys_commitment, public_keys_commitment_bytes, public_keys_commitment_bytes_checked,
-	public_keys_commitment_checked,
+	padded_to_circuit_width, public_keys_commitment, public_keys_commitment_bytes,
+	public_keys_commitment_bytes_checked, public_keys_commitment_checked, NUM_VALIDATORS,
 };
 pub use error::VerifierError;
 pub use proof::{PlonkProof, VerifyingKey};
