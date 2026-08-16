@@ -1,208 +1,176 @@
 # gnark-apk-proofs
 
-Zero-knowledge proofs for BLS G1 aggregated public key (APK) verification, built with [gnark](https://github.com/consensys/gnark). Uses the PLONK proving system with on-chain Solidity verification via EIP-2537 precompiles.
+Zero-knowledge proofs for BLS12-381 aggregated public key (APK) verification, with on-chain verification on Ethereum via EIP-2537 precompiles.
 
-## Overview
+Given a fixed validator set and a bitlist of participants, the circuit proves that a claimed aggregate public key is the correct sum of the participating validators' keys — without revealing the individual keys. It implements the aggregation SNARK from ["Accountable Light Client Systems for PoS Blockchains"](https://eprint.iacr.org/2022/1205) (Ciobotaru et al.), built on [gnark](https://github.com/consensys/gnark)'s PLONK backend.
 
-This project implements a ZK circuit that proves correct aggregation of BLS12-381 G1 public keys for a subset of validators, as described in ["Accountable Light Client Systems for PoS Blockchains"](https://eprint.iacr.org/2022/1205) (Ciobotaru et al., 2022).
+The repository ships three consumers of the same proof:
+- a **Rust prover** (safe wrapper over the Go/gnark prover via static FFI),
+- a **pure-Rust PLONK verifier** (arkworks), and
+- a **Solidity verifier** that combines APK-proof verification with BLS aggregate-signature verification in one call.
 
-The circuit:
-- Accepts 1024 validator public keys as private witnesses
-- Uses a bitlist to indicate participating validators
-- Verifies a Poseidon2 hash commitment to the full validator set
-- Computes `apk = Seed + Σ(b_i * pk_i)` and checks it against the expected aggregate
+## How it works
 
-Rogue key attacks are prevented by requiring Proof of Possession (PoP) at registration.
+The circuit takes 1024 validator public keys (`G1`) as a **private** witness, and three **public** inputs:
 
-The on-chain verifier combines APK proof verification (PLONK) with BLS aggregate signature verification in a single call, using EIP-2537 precompiles for BLS12-381 curve operations. It also provides an on-chain `hashToG1` function compatible with [w3f/bls](https://github.com/w3f/bls).
+| Public input | Meaning |
+|---|---|
+| `bitlist` (`uint256[5]`) | which validators participate — 1024 bits packed into 5 field elements |
+| `publicKeysCommitment` | Poseidon2 hash over all 1024 keys, binding the proof to a specific validator set |
+| `expectedApk` (`G1`) | the claimed aggregate: `seed + Σ bᵢ·pkᵢ` |
 
-## Proving backends (CPU / GPU)
+Inside the circuit it (1) recomputes the Poseidon2 commitment from the witnessed keys and checks it against `publicKeysCommitment`, and (2) sums the participating keys and checks the result against `expectedApk`. The commitment ties the proof to a set the verifier trusts; the aggregation proves the APK is correct for that set.
 
-The circuit (1024 validators, ~7.1M constraints) proves under either backend; both produce identical proofs verified by the same Solidity/Rust verifier.
+Two design points make it cheap:
 
-| Backend | Build | Hardware | Prove time |
-|---|---|---|---|
-| **CPU** (default) | `go build` / `cargo build` | any | minutes (RAM-heavy) |
-| **GPU** (CUDA) | `go build -tags cuda` / `cargo build --features cuda` | NVIDIA + CUDA | **~12.5s** (RTX 5090) |
+- **Packed hashing.** Each coordinate's six 64-bit limbs are packed three-to-a-field-element before hashing (4 Poseidon2 compressions per point instead of 12).
+- **Incomplete point addition.** Aggregation uses the affine chord formula, which is only valid when operands have distinct x-coordinates. Rather than guard each step, the protocol **seed is placed outside the G1 subgroup**, so the running accumulator stays in a coset disjoint from G1 and the degenerate case is unreachable by construction (Ciobotaru et al. §5.1).
 
-The GPU path is a device-resident PLONK prover built on a [gnark fork](https://github.com/polytope-labs/gnark) (`gpu-plonk-prover` branch) + [libgnark_cuda](https://github.com/polytope-labs/gnark-cuda) (icicle/CUDA). It keeps the proof's polynomials on the device across the whole pipeline and is gated entirely behind `-tags cuda` — the default build is unchanged CPU-only. Building it requires libgnark_cuda + icicle at build time:
+Soundness rests on every *committed* key being in G1 — a property the circuit does not check. It holds because `publicKeysCommitment` is a trusted input: the verifier checks against the committee commitment fixed by chain consensus, and committee registration subgroup-checks keys (BLS `KeyValidate`). A proof-of-possession alone does **not** guarantee G1 membership. See the soundness note in [`circuits/apk/apk.go`](circuits/apk/apk.go) for the full argument.
 
-```bash
-cd circuits
-CGO_CFLAGS="-I<gnark-cuda>/include" \
-CGO_LDFLAGS="-L<gnark-cuda>/build -L<icicle-install>/lib -L/usr/local/cuda/lib64" \
-go test -tags cuda -run TestPlonkProveAndVerify -timeout 30m ./apk/
-```
+## Benchmarks
 
-### GPU from the Rust prover
+Circuit: **3,027,309** PLONK constraints, FFT domain **2²²**. PLONK proving cost tracks the domain (the next power of two above the constraint count), so staying under 2²² = 4,194,304 is what matters.
 
-The Rust prover builds CPU-only by default; enable the icicle GPU backend with the `cuda` feature — **no env vars at build or run time**:
+**Proving** (single proof, 1024 validators):
 
-```toml
-gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", features = ["cuda"] }
-```
+| Phase | CPU | GPU (RTX 5090) |
+|---|---|---|
+| Compile | 2.7s | 2.7s |
+| Setup | 3.9s | 3.9s |
+| Witness | 0.1s | 0.1s |
+| Solve | 2.0s | 0.5s |
+| **Prove** | **17.4s** | **3.6s** |
+| Verify | 3ms | 3ms |
 
-`build.rs` fetches and builds pinned [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda) from source and links them **statically** into the binary. The result is self-contained: it runs with no `LD_LIBRARY_PATH` and no `ICICLE_BACKEND_INSTALL_DIR` — the CUDA backend is `--whole-archive`d in and registers at startup (no dlopen). The only non-system runtime dependency is the stock CUDA runtime (`libcudart`), already on any CUDA host's loader path (the CUDA runtime stays dynamic on purpose — static `cudart` breaks kernel launches). It needs the **CUDA toolkit, CMake, and git** on a machine with an NVIDIA GPU (the CUDA arch is auto-detected via `native`); the first `--features cuda` build compiles icicle's kernels (~10 min), later builds are incremental.
+CPU is `go build` / `cargo build`; GPU needs `-tags cuda` / `--features cuda` (see [GPU proving](#gpu-proving)). The CPU and GPU figures were measured on different machines, so read the ~5× gap as indicative rather than a same-host speedup. First-time setup also derives a domain-specific Lagrange SRS (~1 min, cached per power); the canonical SRS is downloaded once and reused.
 
-```bash
-cargo test -p gnark-plonk-verifier --features gnark-apk-prover/cuda -- --ignored --nocapture
-```
+**On-chain** (Solidity, EIP-2537, Prague EVM):
 
-CI runs the CPU backend (the GPU build needs a CUDA host).
+| | |
+|---|---|
+| Full `verify()` (APK proof + BLS) | 550,840 gas |
+| `hashToG1()` | 38,256 gas |
+| Proof size | 1,184 bytes |
+| Public inputs | 576 bytes (18 × uint256) |
 
-## Project Structure
+## Rust prover
 
-```
-gnark-apk-proofs/
-├── Cargo.toml                 # Rust workspace root
-├── circuits/                  # Go ZK circuit code
-│   ├── go.mod
-│   ├── apk/                   # APK proof circuit + tests
-│   ├── ffi/                   # CGo exports for Rust FFI
-│   └── srs/                   # SRS download + caching from Filecoin ceremony
-├── rust/                      # Rust proving library
-│   ├── ffi/                   # Low-level FFI bindings (builds Go into static archive)
-│   ├── prover/                # Safe Rust API with builder pattern
-│   └── verifier/              # Pure-Rust PLONK verifier (arkworks) + e2e tests
-├── solidity/                  # Foundry/Solidity contracts
-│   ├── foundry.toml
-│   └── contracts/
-│       ├── PlonkVerifier.sol  # Auto-generated gnark PLONK verifier
-│       └── ApkProof.sol       # APK proof + BLS signature verifier + hashToG1
-└── README.md
-```
-
-## Performance
-
-**Circuit:** BLS G1 public key aggregation (1024 validators, Poseidon2 commitment)
-
-### Constraint Count
-
-| System | Constraint Type | Count     |
-|--------|-----------------|-----------|
-| PLONK  | SCS             | 7,097,608 |
-
-### Off-chain (Go)
-
-| Phase       | Time              |
-|-------------|-------------------|
-| Compile     | 5.5s              |
-| SRS / Setup | 44.8s (universal) |
-| Witness gen | 157ms             |
-| Prove       | 40.0s             |
-| Verify      | 3.3ms             |
-
-### On-chain (Solidity, EIP-2537, Prague EVM)
-
-| Operation                       | Gas     |
-|---------------------------------|---------|
-| Full verify (APK proof + BLS)   | 550,924 |
-| hashToG1                        | 38,256  |
-
-| Metric            | Value                |
-|-------------------|----------------------|
-| Proof size        | 1,184 bytes          |
-| Public inputs     | 576 bytes (18 x uint256) |
-
-PLONK uses a universal SRS (no per-circuit trusted setup). Requires Pectra hardfork (EIP-2537 BLS12-381 precompiles).
-
-## Solidity Contract
-
-The `ApkProof` contract provides:
-
-1. **`verify()`** — Combined APK proof + BLS aggregate signature verification in one call
-2. **`hashToG1()`** — On-chain hash-to-curve (RFC 9380) compatible with [w3f/bls](https://github.com/w3f/bls)
-
-```solidity
-// Hash a message to G1 (w3f/bls compatible, cipher suite prepended internally)
-bytes32[3] memory h_m = apkProof.hashToG1(message);
-
-// Verify APK proof + BLS signature
-apkProof.verify(
-    commitment,                    // publicKeysCommitment (Poseidon2 over the validator set)
-    bitlist,                       // uint256[5]
-    aggregatePublicKey,            // apk ∈ G1, bytes32[3] — seed added on-chain
-    plonkProof,
-    h_m,                           // H(m) ∈ G1, bytes32[3]
-    aggregateSignature,            // bytes32[3]
-    aggregatePublicKeyG2           // bytes32[6]
-);
-```
-
-## Rust Library
-
-The Rust crate provides a builder-pattern API for generating proofs, backed by the Go gnark prover via static FFI.
-
-### Usage as a dependency
+Generates proofs by linking the Go/gnark prover into your binary as a static archive — no shared libraries at runtime. **Requires Go 1.25+** at build time.
 
 ```toml
 [dependencies]
 gnark-apk-prover = { git = "https://github.com/polytope-labs/gnark-apk-proofs", branch = "main" }
 ```
 
-**Requires Go 1.25+** installed — the build script compiles the Go circuit code into a static archive that is linked into your Rust binary. No shared libraries needed at runtime.
-
-### Example
-
 ```rust
-use gnark_apk_prover::{ProofBuilder, G1Affine, ProverContext};
+use gnark_apk_prover::{ProofBuilder, ProverContext, G1Affine};
 
-// One-time setup (expensive: ~45s for PLONK)
-// SRS is cached at $HOME/.config/gnark-apk-proofs/srs (downloaded automatically on first run)
+// One-time setup. Downloads + caches the SRS at $HOME/.config/gnark-apk-proofs/srs.
 let ctx = ProverContext::setup(None)?;
 
-// Build and generate a proof
 let proof = ProofBuilder::new(&ctx)
-    .public_keys(validator_keys)   // Vec<G1Affine>, exactly 1024
-    .participation(indices)         // Vec<u16>, participating validator indices
+    .public_keys(validator_keys)   // Vec<G1Affine>, up to 1024 (identity-padded)
+    .participation(indices)        // Vec<u16>, participating validator indices
     .prove()?;
 
-// proof.proof_bytes  — ready for Solidity verifier (1184 bytes)
-// proof.public_inputs — 576 bytes (18 x uint256)
+// Ready for the on-chain verifier:
+//   proof.solidity_proof          — 1184-byte proof calldata
+//   proof.solidity_public_inputs  — 576-byte public inputs
 ```
 
-### Build
+### GPU proving
 
-```bash
-cargo build
+Enable the icicle/CUDA backend with the `cuda` feature — no env vars at build or run time; `build.rs` fetches and statically links [`open-icicle`](https://github.com/ingonyama-zk/open-icicle) + [`gnark-cuda`](https://github.com/polytope-labs/gnark-cuda).
+
+```toml
+gnark-apk-prover = { git = "...", features = ["cuda"] }
 ```
 
-### End-to-end test
+Requirements: **CUDA toolkit ≥ 12.8** (Blackwell/`sm_120` support), **CMake ≥ 3.24**, and git, on an NVIDIA host. The first build compiles icicle's kernels (~15 min); later builds are incremental.
 
-Generates a PLONK proof via Go FFI, signs with BLS (using w3f/bls hash-to-curve), and verifies on-chain in revm:
+> CMake < 3.24 does not understand `-DCMAKE_CUDA_ARCHITECTURES=native` and fails deep in compiler detection with a misleading `nvcc fatal : Unsupported gpu architecture 'compute_'`. Ubuntu 22.04 ships 3.22 — install a newer CMake.
+
+## Rust verifier
+
+A dependency-free (no EVM) PLONK verifier for gnark BLS12-381 proofs, plus helpers to recompute the commitment.
+
+```rust
+use gnark_plonk_verifier::{
+    verify, PlonkProof, VerifyingKey, public_keys_commitment_bytes_checked,
+};
+
+// Recompute the committee commitment from a known key set. The *_checked form
+// asserts every point is in G1 (identity padding allowed); the returned 32-byte
+// value is the big-endian `publicKeysCommitment` argument of the Solidity verifier.
+let commitment: [u8; 32] = public_keys_commitment_bytes_checked(&keys)?;
+
+// Verify a proof natively.
+let vk = VerifyingKey::try_from(vk_bytes.as_slice())?;
+let proof = PlonkProof::try_from((proof_bytes.as_slice(), vk.qcp.len()))?;
+verify(&proof, &vk, &public_inputs)?;
+```
+
+Use `public_keys_commitment_bytes_checked` (not the unchecked `public_keys_commitment`) when deriving the commitment from points of uncertain provenance — the subgroup check is what ties the commitment to the circuit's soundness precondition.
+
+## Solidity verifier
+
+The `ApkProof` contract combines APK-proof verification (PLONK) and BLS aggregate-signature verification into one call, and exposes an on-chain `hashToG1` compatible with [w3f/bls](https://github.com/w3f/bls). Needs the Pectra hardfork (EIP-2537 precompiles).
+
+```solidity
+// H(m) ∈ G1 (cipher suite prepended internally)
+bytes32[3] memory h_m = apkProof.hashToG1(message);
+
+apkProof.verify(
+    commitment,           // publicKeysCommitment (uint256, from the Rust verifier helper)
+    bitlist,              // uint256[5]
+    aggregatePublicKey,   // apk ∈ G1, bytes32[3] — the protocol seed is added on-chain
+    plonkProof,           // bytes
+    h_m,                  // H(m) ∈ G1, bytes32[3]
+    aggregateSignature,   // bytes32[3]
+    aggregatePublicKeyG2  // bytes32[6]
+);
+```
+
+`PlonkVerifier.sol` (the low-level gnark-generated verifier) is regenerated from the circuit; `ApkProof.sol` wraps it with the BLS check and hardcodes the protocol seed.
+
+## Repository layout
+
+```
+circuits/            Go — the ZK circuit
+  apk/               circuit definition, commitment, tests
+  ffi/               CGo exports consumed by the Rust FFI
+  srs/               SRS download + caching (Filecoin ceremony)
+rust/
+  ffi/               low-level bindings; builds Go into a static archive
+  prover/            safe builder-pattern prover API
+  verifier/          pure-Rust PLONK verifier + end-to-end tests
+solidity/contracts/
+  PlonkVerifier.sol  auto-generated gnark PLONK verifier
+  ApkProof.sol       APK proof + BLS verifier + hashToG1
+```
+
+## Development
 
 ```bash
+# Circuit tests
+cd circuits && go test -v -timeout 30m ./apk/
+
+# Regenerate the Solidity verifier + proof fixtures
+cd circuits && go test -v -run TestExportPlonkForFoundry -timeout 30m ./apk/
+
+# End-to-end: Go prover → Rust verifier → Solidity in revm
 cargo test -p gnark-plonk-verifier --test bls_verify -- --ignored --nocapture
 ```
 
-## Go Circuit
-
-### Prerequisites
-
-- Go 1.25+
-- [Foundry](https://book.getfoundry.sh/) (for Solidity compilation)
-
-### Run circuit tests
-
-```bash
-cd circuits
-go test -v -timeout 30m ./apk/
-```
-
-### Generate Solidity verifier and proof fixtures
-
-```bash
-cd circuits
-go test -v -run "TestExportPlonkForFoundry" -timeout 30m ./apk/
-```
+Prerequisites: Go 1.25+, Rust, and [Foundry](https://book.getfoundry.sh/) (Solidity compilation). CI runs the CPU backend; the GPU build needs a CUDA host.
 
 ## References
 
+- [Accountable Light Client Systems for PoS Blockchains](https://eprint.iacr.org/2022/1205) — Ciobotaru et al.
 - [gnark](https://github.com/consensys/gnark) — ZKP framework
-- [Accountable Light Client Systems for PoS Blockchains](https://eprint.iacr.org/2022/1205) — Ciobotaru et al., 2022
-- [Efficient Aggregatable BLS Signatures with Chaum-Pedersen Proofs](https://eprint.iacr.org/2022/1611) — BLS scheme
 - [EIP-2537](https://eips.ethereum.org/EIPS/eip-2537) — BLS12-381 precompiles
-- [w3f/bls](https://github.com/w3f/bls) — Web3 Foundation BLS library
+- [w3f/bls](https://github.com/w3f/bls) — BLS library
 
 ## License
 
