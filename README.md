@@ -39,10 +39,11 @@ Circuit: **3,027,309** PLONK constraints, FFT domain **2²²**. PLONK proving co
 | Compile | 2.7s | 2.7s |
 | Setup | 3.9s | 3.9s |
 | Witness | 0.1s | 0.1s |
-| **Prove** | **17.4s** | **4.2s** |
+| Solve | 2.0s | 0.5s |
+| **Prove** | **17.4s** | **3.6s** |
 | Verify | 3ms | 3ms |
 
-CPU is `go build` / `cargo build`; GPU needs `-tags cuda` / `--features cuda` (see [GPU proving](#gpu-proving)). The two figures come from different RTX 5090 hosts, so treat the GPU/CPU ratio as indicative. First-time setup also derives a domain-specific Lagrange SRS (~1 min, cached per power); the canonical SRS is downloaded once and reused.
+CPU is `go build` / `cargo build`; GPU needs `-tags cuda` / `--features cuda` (see [GPU proving](#gpu-proving)). The CPU and GPU figures were measured on different machines, so read the ~5× gap as indicative rather than a same-host speedup. First-time setup also derives a domain-specific Lagrange SRS (~1 min, cached per power); the canonical SRS is downloaded once and reused.
 
 **On-chain** (Solidity, EIP-2537, Prague EVM):
 
