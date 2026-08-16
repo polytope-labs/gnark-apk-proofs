@@ -124,11 +124,19 @@ costs zero constraints. `TestProtocolSeedOutsideSubgroup` locks the invariant;
 `TestProtocolSeedVectors` locks the coordinates against the copy in
 `ApkProof.sol`.
 
-The coset argument leans on every **committed** key being in G1. That is
-enforced at the FFI trust boundary (`ParseG1` performs on-curve and subgroup
-checks on all 1024 keys) and by Proof-of-Possession registration — the subgroup
-check is load-bearing for the incomplete addition's soundness, not merely BLS
-key hygiene.
+The coset argument leans on every **committed** key being in G1 — a property the
+circuit cannot check and does not try to. It is not enforced by the in-circuit
+constraints, nor by the FFI `ParseG1` (which runs only in the honest prover; a
+malicious prover supplies the witness directly and bypasses it). It holds
+because `PublicKeysCommitment` is a *trusted input*: the verifier checks the
+proof against the committee commitment fixed by chain consensus, and the binding
+commitment pins the prover to exactly those keys. So soundness reduces to "the
+committee commitment is over G1 keys", which is committee registration's job.
+Note a Proof-of-Possession does not establish this alone — for `Q = pk + T` with
+`T` of cofactor order the pairing annihilates `T`, so a PoP verifies for a non-G1
+`Q` unless registration also runs an explicit subgroup check (BLS `KeyValidate`).
+This matches the paper's model, where key validity is a precondition delegated to
+a trusted party rather than proven in the SNARK.
 
 On-chain this is transparent: the contract adds the seed to the caller's APK via
 the EIP-2537 `G1ADD` precompile, which checks on-curve only (no subgroup check),

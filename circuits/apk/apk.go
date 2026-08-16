@@ -220,12 +220,23 @@ func (circuit *ApkProofCircuit) Define(api frontend.API) error {
 	// alike, since Add runs unconditionally before the Select.
 	//
 	// SOUNDNESS DEPENDENCY: this argument leans on every COMMITTED key being in
-	// G1. That is enforced where the commitment's key set enters the system —
-	// ParseG1's subgroup check at the FFI boundary, backed by PoP registration.
-	// The subgroup check is therefore load-bearing for the incomplete addition,
-	// not merely for BLS key hygiene: committing a valid-curve point OUTSIDE G1
-	// would void the coset argument and reopen the free-λ forgery. Do not weaken
-	// ParseG1, and do not introduce a commitment path that bypasses it.
+	// G1 — and that is NOT enforced by the circuit, nor by the FFI ParseG1. A
+	// malicious prover supplies the witness directly and never runs ParseG1
+	// (it lives only in the honest prover), so ParseG1 is defense-in-depth for
+	// the honest path, not the soundness anchor.
+	//
+	// The property holds because PublicKeysCommitment is a TRUSTED public input:
+	// the verifier checks the proof against the committee commitment fixed by
+	// chain consensus, and the binding, injective commitment pins the prover to
+	// exactly the committed keys — a non-G1 key would change the digest and fail
+	// to match. So soundness reduces to "the committee commitment is over G1
+	// keys", which is committee registration's responsibility. Note that a BLS
+	// Proof of Possession does NOT establish this on its own: for Q = pk + T
+	// with T of order dividing the G1 cofactor, the pairing annihilates T
+	// (T ∈ r·E(Fp)), so a PoP verifies for Q ∉ G1 unless registration also does
+	// an explicit subgroup check (BLS KeyValidate). If an integration ever lets
+	// the committee commitment range over non-subgroup keys, the coset argument
+	// — and this circuit's soundness — breaks.
 	for i := range 1024 {
 		hasher.Write(packLimbs(api, circuit.PublicKeys[i].X.Limbs)...)
 		hasher.Write(packLimbs(api, circuit.PublicKeys[i].Y.Limbs)...)
