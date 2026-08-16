@@ -11,14 +11,14 @@ import (
 // TestCommitmentVectors locks the Poseidon2 PublicKeysCommitment over deterministic
 // k*generator point sets, as 32-byte big-endian hex. The Rust port in
 // rust/verifier/src/commitment.rs asserts the same vectors; if gnark-crypto's
-// Poseidon2 parameters ever change, both this test and the Rust test must be
-// regenerated together.
+// Poseidon2 parameters or the limb packing (see LimbsPerElement) ever change,
+// both this test and the Rust test must be regenerated together.
 func TestCommitmentVectors(t *testing.T) {
 	want := map[int]string{
-		1:  "3b14900f1cd55f300914ca5b4393f0fa6a777d5999963f9520b12a60204272e2",
-		2:  "528fad7e07c1ec6db4ad009230329123e643e1629733d60d2b4eaa9e45dc5704",
-		3:  "14bac0391b3646f28d9b0b6b64acca1c8c585ade555494ce189aa2e4b62e9977",
-		10: "4a401453041545fc28ebf4c3c2824f317d1c4a7b6bff644d6eb12d0edd1f64c5",
+		1:  "4df3ca8a29f6b37c04fefb167022ae638df17383caf668b718bf3b65aa320652",
+		2:  "20b814b4a4cd0249ffee16a12c0e883eac49a18e91f104e0c777d7de9a797267",
+		3:  "1d8d8ce5d1437ebe81c7a10c59d25ec6f53bffb9966d019f460157750a7a1cff",
+		10: "5f9529f2a793ad64450341a6ef732dc1e1b71ddcca7d83f3704ff5e637a4b3bd",
 	}
 	_, _, g1, _ := bls12381.Generators()
 	for n, exp := range want {

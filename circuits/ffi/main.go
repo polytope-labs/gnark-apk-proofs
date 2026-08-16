@@ -65,8 +65,8 @@ type plonkSetup struct {
 }
 
 const (
-	// Default SRS power for the APK circuit (~7.1M PLONK constraints).
-	defaultSRSPower = 23
+	// Default SRS power for the APK circuit (~3.3M PLONK constraints).
+	defaultSRSPower = srs.DefaultPower
 )
 
 //export ApkSetup

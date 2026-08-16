@@ -40,7 +40,7 @@ func TestPlonkProveAndVerify(t *testing.T) {
 
 	t.Log("Loading KZG SRS...")
 	startSRS := time.Now()
-	kzgSrs, kzgSrsLag, err := srs.LoadDefault(23)
+	kzgSrs, kzgSrsLag, err := srs.LoadDefault(srs.DefaultPower)
 	srsTime := time.Since(startSRS)
 	assert.NoError(t, err, "Failed to load SRS")
 	t.Logf("SRS loaded in %v", srsTime)

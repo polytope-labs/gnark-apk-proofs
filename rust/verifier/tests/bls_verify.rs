@@ -323,6 +323,21 @@ fn test_full_verify() {
 	}
 	let commitment = U256::from_be_slice(&raw_pi[5 * 32..6 * 32]);
 
+	// Cross-check the standalone commitment helper against gnark's public input.
+	// A light client derives `publicKeysCommitment` via this function (over the
+	// full 1024-key set, identity-padded like the prover) without running the
+	// prover; its 32-byte big-endian output must equal, as a uint256, the value
+	// the contract consumes at public-input slot 5.
+	let mut padded_keys = g1_pks.clone();
+	padded_keys.resize(NUM_VALIDATORS, G1Affine::identity());
+	let helper_bytes = gnark_plonk_verifier::public_keys_commitment_bytes_checked(&padded_keys)
+		.expect("validator keys must be valid G1 points");
+	assert_eq!(
+		U256::from_be_slice(&helper_bytes),
+		commitment,
+		"public_keys_commitment_bytes_checked does not match gnark public input #5",
+	);
+
 	// ── 6. Deploy and call combined verify() on revm ──
 	println!("Deploying contracts in revm...");
 	let mut evm = create_evm();
